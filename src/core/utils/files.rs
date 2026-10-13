@@ -1,3 +1,4 @@
+use crossbeam_channel::Sender;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -5,15 +6,21 @@ use std::fs::{copy, create_dir_all, read_dir};
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::thread;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
+use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
-    BHID_SFUIObject, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, IContextMenu, IShellItem,
+    BHID_SFUIObject, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, IContextMenu,
+    IFileOperationProgressSink, IFileOperationProgressSink_Impl, IShellItem,
     SHCreateItemFromIDList, SHFILEINFOW, SHGFI_TYPENAME, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
+    SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-use windows::core::{Error, HRESULT, PCSTR, PCWSTR};
+use windows::core::{Error, HRESULT, PCSTR, PCWSTR, PWSTR, Ref, implement};
 
 pub fn get_file_type_name<'a>(ext: &str, cache: &'a mut HashMap<String, String>) -> &'a str {
     use std::collections::hash_map::Entry;
@@ -127,48 +134,375 @@ pub fn filename_has_valid_characters_realtime(name: &str) -> bool {
     true
 }
 
-pub fn delete_paths_native(paths: Vec<PathBuf>, allow_undo: bool) -> windows::core::Result<()> {
-    use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
-    use windows::Win32::UI::Shell::{
-        FILEOPERATION_FLAGS, FOF_ALLOWUNDO, FileOperation, IFileOperation, IShellItem,
-        SHCreateItemFromParsingName,
-    };
-    use windows::core::HSTRING;
+/// Progress messages streamed from a background shell file-operation worker to
+/// the UI thread.
+#[derive(Clone, Debug)]
+pub enum FileOpProgress {
+    /// The shell operation began (fires after any confirmation prompt is accepted).
+    Started,
+    /// Overall work counters reported by the shell.
+    Progress { total: u32, done: u32 },
+    /// Absolute path of the item currently being processed.
+    Item { name: String },
+    /// The operation finished. `cancelled` reflects a user-initiated abort.
+    Finished {
+        cancelled: bool,
+        error: Option<String>,
+    },
+}
 
-    unsafe {
-        let file_op: IFileOperation = CoCreateInstance(&FileOperation, None, CLSCTX_ALL)?;
+/// Which shell operation `file_op_async` should perform on the given sources.
+pub enum FileOpKind {
+    /// Delete to the recycle bin (`allow_undo`) or permanently.
+    Delete { allow_undo: bool },
+    /// Move every source into `dest`.
+    Move { dest: PathBuf },
+    /// Copy every source into `dest`.
+    Copy { dest: PathBuf },
+}
 
-        // Normal deletion:
-        //   - send items to the Recycle Bin
-        //   - allow the operation to be undone
-        //
-        // Recycle Bin deletion:
-        //   - permanently delete the items
-        let flags = if allow_undo {
-            FOF_ALLOWUNDO
-        } else {
-            FILEOPERATION_FLAGS(0)
-        };
+#[implement(IFileOperationProgressSink)]
+struct FileOpProgressSink {
+    tx: Sender<FileOpProgress>,
+    cancel: Arc<AtomicBool>,
+    notify: Arc<dyn Fn() + Send + Sync>,
+    /// Number of top-level items we asked the shell to process.
+    base_total: u32,
+    /// Items confirmed done via a `Post*Item` callback — the reliable per-item signal.
+    post_count: AtomicU32,
+    /// Latest figures from the shell's `UpdateProgress` (may count sub-items).
+    work_total: AtomicU32,
+    work_sofar: AtomicU32,
+}
 
-        file_op.SetOperationFlags(flags)?;
-
-        for path in paths {
-            let path = HSTRING::from(path.to_string_lossy().as_ref());
-
-            let item: IShellItem = SHCreateItemFromParsingName(&path, None)?;
-
-            file_op.DeleteItem(&item, None)?;
-        }
-
-        // This is intentionally synchronous.
-        //
-        // Windows owns the progress UI while the operation is running,
-        // and we don't update ItemViewer state until the operation has
-        // completely finished.
-        file_op.PerformOperations()?;
+impl FileOpProgressSink {
+    fn emit(&self, msg: FileOpProgress) {
+        let _ = self.tx.send(msg);
+        (self.notify)();
     }
 
-    Ok(())
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// Progress is driven mainly by `Post*Item` counts; the shell's
+    /// `UpdateProgress` figures are folded in as a secondary signal (whichever is
+    /// further along wins), because `iWorkSoFar` frequently stays 0 for deletes.
+    fn emit_progress(&self) {
+        let total = self.base_total.max(self.work_total.load(Ordering::Relaxed));
+        let done = self
+            .post_count
+            .load(Ordering::Relaxed)
+            .max(self.work_sofar.load(Ordering::Relaxed))
+            .min(total);
+        self.emit(FileOpProgress::Progress { total, done });
+    }
+
+    /// Shared `Pre*Item` body: abort if cancelled, else report the current item.
+    fn report_item(&self, psiitem: Ref<'_, IShellItem>) -> windows::core::Result<()> {
+        if self.cancelled() {
+            return cancel_abort();
+        }
+        if let Some(name) = shell_item_path(psiitem) {
+            self.emit(FileOpProgress::Item { name });
+        }
+        Ok(())
+    }
+
+    /// Shared `Post*Item` body: abort if cancelled, else advance the counter.
+    fn report_post(&self) -> windows::core::Result<()> {
+        if self.cancelled() {
+            return cancel_abort();
+        }
+        self.post_count.fetch_add(1, Ordering::Relaxed);
+        self.emit_progress();
+        Ok(())
+    }
+}
+
+/// A failed HRESULT from a progress-sink callback aborts the whole shell operation,
+/// which is how the Cancel button stops an in-flight delete.
+fn cancel_abort() -> windows::core::Result<()> {
+    // HRESULT_FROM_WIN32(ERROR_CANCELLED)
+    Err(Error::from(HRESULT(0x8007_04C7u32 as i32)))
+}
+
+fn shell_item_path(psiitem: Ref<'_, IShellItem>) -> Option<String> {
+    let item = psiitem.ok().ok()?;
+    let pwstr = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH) }.ok()?;
+    let text = unsafe { pwstr_to_string(pwstr) };
+    unsafe { CoTaskMemFree(Some(pwstr.0 as _)) };
+    if text.is_empty() { None } else { Some(text) }
+}
+
+unsafe fn pwstr_to_string(pw: PWSTR) -> String {
+    if pw.0.is_null() {
+        return String::new();
+    }
+    let mut len = 0usize;
+    let mut ptr = pw.0;
+    unsafe {
+        while !ptr.is_null() && *ptr != 0 {
+            len += 1;
+            ptr = ptr.add(1);
+        }
+    }
+    let slice = unsafe { std::slice::from_raw_parts(pw.0, len) };
+    String::from_utf16_lossy(slice)
+}
+
+impl IFileOperationProgressSink_Impl for FileOpProgressSink_Impl {
+    fn StartOperations(&self) -> windows::core::Result<()> {
+        self.emit(FileOpProgress::Started);
+        // Seed the total so the bar shows "0 / N" immediately instead of a spinner.
+        self.emit_progress();
+        Ok(())
+    }
+
+    fn FinishOperations(&self, _hrresult: HRESULT) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn PreRenameItem(
+        &self,
+        _dwflags: u32,
+        _psiitem: Ref<'_, IShellItem>,
+        _psznewname: &PCWSTR,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn PostRenameItem(
+        &self,
+        _dwflags: u32,
+        _psiitem: Ref<'_, IShellItem>,
+        _psznewname: &PCWSTR,
+        _hrrename: HRESULT,
+        _psinewlycreated: Ref<'_, IShellItem>,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn PreMoveItem(
+        &self,
+        _dwflags: u32,
+        psiitem: Ref<'_, IShellItem>,
+        _psidestinationfolder: Ref<'_, IShellItem>,
+        _psznewname: &PCWSTR,
+    ) -> windows::core::Result<()> {
+        self.report_item(psiitem)
+    }
+
+    fn PostMoveItem(
+        &self,
+        _dwflags: u32,
+        _psiitem: Ref<'_, IShellItem>,
+        _psidestinationfolder: Ref<'_, IShellItem>,
+        _psznewname: &PCWSTR,
+        _hrmove: HRESULT,
+        _psinewlycreated: Ref<'_, IShellItem>,
+    ) -> windows::core::Result<()> {
+        self.report_post()
+    }
+
+    fn PreCopyItem(
+        &self,
+        _dwflags: u32,
+        psiitem: Ref<'_, IShellItem>,
+        _psidestinationfolder: Ref<'_, IShellItem>,
+        _psznewname: &PCWSTR,
+    ) -> windows::core::Result<()> {
+        self.report_item(psiitem)
+    }
+
+    fn PostCopyItem(
+        &self,
+        _dwflags: u32,
+        _psiitem: Ref<'_, IShellItem>,
+        _psidestinationfolder: Ref<'_, IShellItem>,
+        _psznewname: &PCWSTR,
+        _hrcopy: HRESULT,
+        _psinewlycreated: Ref<'_, IShellItem>,
+    ) -> windows::core::Result<()> {
+        self.report_post()
+    }
+
+    fn PreDeleteItem(
+        &self,
+        _dwflags: u32,
+        psiitem: Ref<'_, IShellItem>,
+    ) -> windows::core::Result<()> {
+        self.report_item(psiitem)
+    }
+
+    fn PostDeleteItem(
+        &self,
+        _dwflags: u32,
+        _psiitem: Ref<'_, IShellItem>,
+        _hrdelete: HRESULT,
+        _psinewlycreated: Ref<'_, IShellItem>,
+    ) -> windows::core::Result<()> {
+        self.report_post()
+    }
+
+    fn PreNewItem(
+        &self,
+        _dwflags: u32,
+        _psidestinationfolder: Ref<'_, IShellItem>,
+        _psznewname: &PCWSTR,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn PostNewItem(
+        &self,
+        _dwflags: u32,
+        _psidestinationfolder: Ref<'_, IShellItem>,
+        _psznewname: &PCWSTR,
+        _psztemplatename: &PCWSTR,
+        _dwfileattributes: u32,
+        _hrnew: HRESULT,
+        _psinewitem: Ref<'_, IShellItem>,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn UpdateProgress(&self, iworktotal: u32, iworksofar: u32) -> windows::core::Result<()> {
+        if self.cancelled() {
+            return cancel_abort();
+        }
+        if iworktotal > 0 {
+            self.work_total.store(iworktotal, Ordering::Relaxed);
+        }
+        self.work_sofar.store(iworksofar, Ordering::Relaxed);
+        self.emit_progress();
+        Ok(())
+    }
+
+    fn ResetTimer(&self) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn PauseTimer(&self) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn ResumeTimer(&self) -> windows::core::Result<()> {
+        Ok(())
+    }
+}
+
+/// Runs a shell file operation (delete/move/copy) on a background STA thread so
+/// the UI thread never blocks (blocking it previously made Windows flag
+/// EdenExplorer as "Not Responding" on large operations). Progress is streamed to
+/// `tx`; `notify` requests a UI repaint from the worker so updates appear without
+/// busy-polling.
+///
+/// Windows' own progress dialog is suppressed (`FOF_SILENT`) in favor of the
+/// caller's UI, while confirmation prompts (recycle-bin / merge collisions) are
+/// preserved (we do not set `FOF_NOCONFIRMATION`). `owner_hwnd` is the raw pointer
+/// value of the window that should own any shell dialog (0 for none). Setting
+/// `cancel` aborts the operation at the next item boundary.
+pub fn file_op_async(
+    kind: FileOpKind,
+    sources: Vec<PathBuf>,
+    owner_hwnd: isize,
+    tx: Sender<FileOpProgress>,
+    cancel: Arc<AtomicBool>,
+    notify: Arc<dyn Fn() + Send + Sync>,
+) {
+    if sources.is_empty() {
+        let _ = tx.send(FileOpProgress::Finished {
+            cancelled: false,
+            error: None,
+        });
+        notify();
+        return;
+    }
+
+    thread::spawn(move || {
+        use windows::Win32::System::Com::{
+            CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
+        };
+        use windows::Win32::UI::Shell::{
+            FILEOPERATION_FLAGS, FOF_ALLOWUNDO, FOF_SILENT, FileOperation, IFileOperation,
+            SHCreateItemFromParsingName,
+        };
+        use windows::core::HSTRING;
+
+        unsafe {
+            // Shell operations and their dialogs need a single-threaded apartment
+            // with a message pump, which PerformOperations provides on this thread.
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+
+            let result = (|| -> windows::core::Result<()> {
+                let file_op: IFileOperation = CoCreateInstance(&FileOperation, None, CLSCTX_ALL)?;
+
+                // FOF_SILENT hides Windows' progress dialog (we render our own);
+                // omitting FOF_NOCONFIRMATION keeps confirmation prompts.
+                let allow_undo = match &kind {
+                    FileOpKind::Delete { allow_undo } => *allow_undo,
+                    FileOpKind::Move { .. } | FileOpKind::Copy { .. } => true,
+                };
+                let undo = if allow_undo { FOF_ALLOWUNDO.0 } else { 0 };
+                file_op.SetOperationFlags(FILEOPERATION_FLAGS(FOF_SILENT.0 | undo))?;
+
+                if owner_hwnd != 0 {
+                    file_op.SetOwnerWindow(HWND(owner_hwnd as *mut core::ffi::c_void))?;
+                }
+
+                let base_total = sources.len() as u32;
+                let sink: IFileOperationProgressSink = FileOpProgressSink {
+                    tx: tx.clone(),
+                    cancel: cancel.clone(),
+                    notify: notify.clone(),
+                    base_total,
+                    post_count: AtomicU32::new(0),
+                    work_total: AtomicU32::new(0),
+                    work_sofar: AtomicU32::new(0),
+                }
+                .into();
+                let cookie = file_op.Advise(&sink)?;
+
+                // Build the destination item once for move/copy operations.
+                let dest_item: Option<IShellItem> = match &kind {
+                    FileOpKind::Delete { .. } => None,
+                    FileOpKind::Move { dest } | FileOpKind::Copy { dest } => {
+                        let hdest = HSTRING::from(dest.to_string_lossy().as_ref());
+                        Some(SHCreateItemFromParsingName(&hdest, None)?)
+                    }
+                };
+
+                for path in &sources {
+                    let hpath = HSTRING::from(path.to_string_lossy().as_ref());
+                    let item: IShellItem = SHCreateItemFromParsingName(&hpath, None)?;
+                    match &kind {
+                        FileOpKind::Delete { .. } => {
+                            file_op.DeleteItem(&item, None)?;
+                        }
+                        FileOpKind::Move { .. } => {
+                            file_op.MoveItem(&item, dest_item.as_ref().unwrap(), None, None)?;
+                        }
+                        FileOpKind::Copy { .. } => {
+                            file_op.CopyItem(&item, dest_item.as_ref().unwrap(), None, None)?;
+                        }
+                    }
+                }
+
+                file_op.PerformOperations()?;
+                let _ = file_op.Unadvise(cookie);
+                Ok(())
+            })();
+
+            let _ = tx.send(FileOpProgress::Finished {
+                cancelled: cancel.load(Ordering::Relaxed),
+                error: result.err().map(|e| e.to_string()),
+            });
+            notify();
+
+            CoUninitialize();
+        }
+    });
 }
 
 pub fn restore_paths_native(pidls: Vec<Vec<u8>>) -> windows::core::Result<()> {

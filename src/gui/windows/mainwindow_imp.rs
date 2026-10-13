@@ -11,9 +11,9 @@ use crate::gui::theme::{
     ThemeMode, ThemePalette, apply_font_to_context, get_default_palette, set_palette,
 };
 use crate::gui::utils::{
-    ClipboardFileRead, SortColumn, SortKey, delete_paths_native, directory_child_paths,
-    is_clipboard_cut, read_clipboard_files, restore_paths_native, selection_paths_after_paste,
-    set_clipboard_files, show_copy_move_dialog, sort_files_by_keys,
+    ClipboardFileRead, FileOpKind, FileOpProgress, SortColumn, SortKey, directory_child_paths,
+    file_op_async, is_clipboard_cut, read_clipboard_files, restore_paths_native,
+    selection_paths_after_paste, set_clipboard_files, show_copy_move_dialog, sort_files_by_keys,
 };
 use crate::gui::windows::about::draw_about_window;
 use crate::gui::windows::containers::enums::{
@@ -21,10 +21,10 @@ use crate::gui::windows::containers::enums::{
 };
 use crate::gui::windows::containers::itemviewer_navbar::open_default_terminal;
 use crate::gui::windows::containers::structs::{
-    FavoriteItem, FilterState, GalleryThumbnailSize, ItemViewerColumnFitRequest,
-    ItemViewerColumnState, ItemViewerDisplayMode, ItemViewerFolderSizeState,
-    ItemViewerNavBarAction, RenameState, SidebarAction, SplitSide, TabState, TabView, TabsAction,
-    TopbarAction,
+    FavoriteItem, FileOpCompletion, FileOpState, FilterState, GalleryThumbnailSize,
+    ItemViewerColumnFitRequest, ItemViewerColumnState, ItemViewerDisplayMode,
+    ItemViewerFolderSizeState, ItemViewerNavBarAction, RenameState, SidebarAction, SplitSide,
+    TabState, TabView, TabsAction, TopbarAction,
 };
 use crate::gui::windows::customizetheme::draw_theme_customizer;
 use crate::gui::windows::enums::{SettingsAction, ThemeCustomizerAction};
@@ -373,7 +373,12 @@ impl MainWindow {
             view.sort_keys.clone()
         };
 
-        sort_files_by_keys(&mut self.active_tab_mut().view_mut(side).files, &sort_keys);
+        let tag_counts = self.tag_counts_for_sort_keys(&sort_keys);
+        sort_files_by_keys(
+            &mut self.active_tab_mut().view_mut(side).files,
+            &sort_keys,
+            &tag_counts,
+        );
 
         let snapshot = directory_settings_snapshot_for_view(self.active_tab().view(side));
         let _ = persist_directory_settings_snapshot(
@@ -434,6 +439,116 @@ impl MainWindow {
                 .recycle_bin_column_sizes,
             &self.settings_window.current_settings.directory_settings,
         );
+    }
+
+    pub(crate) fn tag_counts_for_sort_keys(
+        &self,
+        keys: &[SortKey],
+    ) -> std::collections::HashMap<PathBuf, usize> {
+        if keys.iter().any(|key| key.column == SortColumn::Tags) {
+            self.tags_state.tag_count_map()
+        } else {
+            std::collections::HashMap::new()
+        }
+    }
+
+    /// Polls the background file-operation worker, updates the progress window
+    /// state, and on completion runs the operation's post-step and reloads.
+    pub fn handle_file_op_progress(&mut self, ctx: &egui::Context) {
+        enum Outcome {
+            Running {
+                started: bool,
+            },
+            Done {
+                cancelled: bool,
+                error: Option<String>,
+            },
+        }
+
+        let outcome = if let Some(state) = self.file_op.as_mut() {
+            let mut finished = None;
+            while let Ok(msg) = state.rx.try_recv() {
+                match msg {
+                    FileOpProgress::Started => state.started = true,
+                    FileOpProgress::Progress { total, done } => {
+                        state.total = total;
+                        state.done = done;
+                    }
+                    FileOpProgress::Item { name } => state.current_item = name,
+                    FileOpProgress::Finished { cancelled, error } => {
+                        finished = Some((cancelled, error))
+                    }
+                }
+            }
+            match finished {
+                Some((cancelled, error)) => Outcome::Done { cancelled, error },
+                None => Outcome::Running {
+                    started: state.started,
+                },
+            }
+        } else {
+            return;
+        };
+
+        match outcome {
+            Outcome::Done { cancelled, error } => {
+                let state = self.file_op.take().expect("file_op present");
+                if let Some(e) = error {
+                    if cancelled {
+                        eprintln!("File operation cancelled: {}", e);
+                    } else {
+                        eprintln!("File operation failed: {}", e);
+                    }
+                }
+                self.run_file_op_completion(state.completion);
+                ctx.request_repaint();
+            }
+            Outcome::Running { started } => {
+                // Keep the progress window animating while it's visible.
+                if started {
+                    ctx.request_repaint();
+                }
+            }
+        }
+    }
+
+    /// Post-processing after a background file operation completes (UI thread).
+    /// Tag bookkeeping differs per operation; the view is always reloaded.
+    fn run_file_op_completion(&mut self, completion: FileOpCompletion) {
+        match completion {
+            FileOpCompletion::Delete { paths } => {
+                // Prune tags only for paths that are actually gone, so a partial
+                // delete or cancellation doesn't drop tags for surviving files.
+                let mut tags_changed = false;
+                for path in &paths {
+                    if !path.exists() {
+                        tags_changed |= self.tags_state.remove_path_prefix(path);
+                    }
+                }
+                if tags_changed {
+                    self.persist_tags();
+                }
+            }
+            FileOpCompletion::Paste {
+                sources,
+                target_dir,
+                before_entries,
+                is_cut,
+            } => {
+                if is_cut && self.move_tagged_paths_to_dir(&sources, &target_dir) {
+                    self.persist_tags();
+                }
+                let pasted = selection_paths_after_paste(&target_dir, &before_entries, &sources);
+                if !pasted.is_empty() {
+                    let side = self.focused_split;
+                    self.active_tab_mut()
+                        .view_mut(side)
+                        .explorer_state
+                        .pending_selection_paths = Some(pasted);
+                }
+            }
+        }
+        self.load_path();
     }
 
     fn apply_item_viewer_column_order(
@@ -499,6 +614,8 @@ impl MainWindow {
         }
 
         if is_root {
+            let sort_keys = self.active_tab().view(side).sort_keys.clone();
+            let tag_counts = self.tag_counts_for_sort_keys(&sort_keys);
             let view = self.active_tab_mut().view_mut(side);
             for d in get_drive_infos() {
                 let label = d.display;
@@ -516,7 +633,7 @@ impl MainWindow {
                 }
             }
 
-            sort_files_by_keys(&mut view.files, &view.sort_keys);
+            sort_files_by_keys(&mut view.files, &sort_keys, &tag_counts);
             return;
         }
 
@@ -686,9 +803,11 @@ impl MainWindow {
             CoTaskMemFree(Some(recycle_pidl as _));
         }
 
+        let sort_keys = self.active_tab().view(side).sort_keys.clone();
+        let tag_counts = self.tag_counts_for_sort_keys(&sort_keys);
         let view = self.active_tab_mut().view_mut(side);
         view.files = recycle_items;
-        sort_files_by_keys(&mut view.files, &view.sort_keys);
+        sort_files_by_keys(&mut view.files, &sort_keys, &tag_counts);
     }
 
     pub fn create_new_folder(&mut self) {
@@ -881,9 +1000,7 @@ impl MainWindow {
                 let _ = copy_text_to_clipboard(self.hwnd, &text);
             }
             ItemViewerContextAction::Paste => {
-                if let Err(e) = self.paste_clipboard_native() {
-                    eprintln!("Paste failed: {}", e);
-                }
+                self.paste_clipboard_native();
             }
             ItemViewerContextAction::Restore(paths) => {
                 let recycle_bin_pidls: Vec<Vec<u8>> = {
@@ -905,13 +1022,8 @@ impl MainWindow {
 
                 self.load_path();
             }
-            ItemViewerContextAction::AddTag(paths) => {
+            ItemViewerContextAction::ManageTags(paths) => {
                 self.tags_state.open_picker(paths);
-            }
-            ItemViewerContextAction::RemoveTag(paths) => {
-                if self.tags_state.remove_paths(&paths) {
-                    self.persist_tags();
-                }
             }
             ItemViewerContextAction::RenameRequest(path, new_name) => {
                 let trimmed = new_name.trim();
@@ -985,23 +1097,37 @@ impl MainWindow {
                 self.rename_state = None;
             }
             ItemViewerContextAction::Delete(paths) => {
-                let allow_undo = !self.current_nav().is_recycle_bin();
-
-                if let Err(e) = delete_paths_native(paths.clone(), allow_undo) {
-                    eprintln!("Native delete failed: {:?}", e);
+                // Ignore a second operation while one is already in flight.
+                if self.file_op.is_some() {
                     return;
                 }
 
-                let mut tags_changed = false;
-                for path in &paths {
-                    tags_changed |= self.tags_state.remove_path_prefix(path);
-                }
+                let allow_undo = !self.current_nav().is_recycle_bin();
+                let (tx, rx) = unbounded();
+                let cancel = Arc::new(AtomicBool::new(false));
+                let owner_hwnd = self.hwnd.map(|h| h.0 as isize).unwrap_or(0);
+                let notify: Arc<dyn Fn() + Send + Sync> =
+                    Arc::new(|| crate::gui::windows::windowsoverrides::request_repaint());
 
-                if tags_changed {
-                    self.persist_tags();
-                }
+                file_op_async(
+                    FileOpKind::Delete { allow_undo },
+                    paths.clone(),
+                    owner_hwnd,
+                    tx,
+                    cancel.clone(),
+                    notify,
+                );
 
-                self.load_path();
+                self.file_op = Some(FileOpState {
+                    rx,
+                    cancel,
+                    title_key: "delete_progress_title",
+                    completion: FileOpCompletion::Delete { paths },
+                    started: false,
+                    total: 0,
+                    done: 0,
+                    current_item: String::new(),
+                });
             }
             ItemViewerContextAction::Properties(paths) => {
                 self.open_properties_multi(&paths);
@@ -1009,70 +1135,65 @@ impl MainWindow {
         }
     }
 
-    pub fn paste_clipboard_native(&mut self) -> windows::core::Result<()> {
-        use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
-        use windows::Win32::UI::Shell::{
-            FOF_ALLOWUNDO, FileOperation, IFileOperation, IShellItem, SHCreateItemFromParsingName,
-        };
-        use windows::core::HSTRING;
+    pub fn paste_clipboard_native(&mut self) {
+        // One file operation at a time.
+        if self.file_op.is_some() {
+            return;
+        }
 
         let paths = match read_clipboard_files() {
             ClipboardFileRead::Files(paths) if !paths.is_empty() => paths,
-            _ => return Ok(()),
+            _ => return,
         };
 
         if self.current_nav().is_recycle_bin() {
-            return Ok(());
+            return;
         }
 
         let is_cut = is_clipboard_cut();
         let target_dir = self.current_nav().current.clone();
         let before_entries = directory_child_paths(&target_dir);
 
-        unsafe {
-            let file_op: IFileOperation = CoCreateInstance(&FileOperation, None, CLSCTX_ALL)?;
+        let (tx, rx) = unbounded();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let owner_hwnd = self.hwnd.map(|h| h.0 as isize).unwrap_or(0);
+        let notify: Arc<dyn Fn() + Send + Sync> =
+            Arc::new(|| crate::gui::windows::windowsoverrides::request_repaint());
 
-            // Leave collision handling to the Windows shell. In particular, a folder with the
-            // same name in the target should produce Explorer's merge confirmation instead of
-            // silently creating a " - Copy" sibling.
-            file_op.SetOperationFlags(FOF_ALLOWUNDO)?;
-
-            let target_item: IShellItem = SHCreateItemFromParsingName(
-                &HSTRING::from(self.current_nav().current.to_string_lossy().to_string()),
-                None,
-            )?;
-
-            for path in &paths {
-                let source_item: IShellItem = SHCreateItemFromParsingName(
-                    &HSTRING::from(path.to_string_lossy().to_string()),
-                    None,
-                )?;
-
-                if is_cut {
-                    file_op.MoveItem(&source_item, &target_item, None, None)?;
-                } else {
-                    file_op.CopyItem(&source_item, &target_item, None, None)?;
-                }
+        // Collision handling stays with the shell: FOF_SILENT hides only the
+        // progress dialog, not the merge/rename confirmations.
+        let kind = if is_cut {
+            FileOpKind::Move {
+                dest: target_dir.clone(),
             }
+        } else {
+            FileOpKind::Copy {
+                dest: target_dir.clone(),
+            }
+        };
+        let title_key = if is_cut {
+            "move_progress_title"
+        } else {
+            "copy_progress_title"
+        };
 
-            file_op.PerformOperations()?;
-        }
+        file_op_async(kind, paths.clone(), owner_hwnd, tx, cancel.clone(), notify);
 
-        if is_cut && self.move_tagged_paths_to_dir(&paths, &target_dir) {
-            self.persist_tags();
-        }
-
-        let pasted_paths = selection_paths_after_paste(&target_dir, &before_entries, &paths);
-        if !pasted_paths.is_empty() {
-            let side = self.focused_split;
-            self.active_tab_mut()
-                .view_mut(side)
-                .explorer_state
-                .pending_selection_paths = Some(pasted_paths);
-        }
-
-        self.load_path();
-        Ok(())
+        self.file_op = Some(FileOpState {
+            rx,
+            cancel,
+            title_key,
+            completion: FileOpCompletion::Paste {
+                sources: paths,
+                target_dir,
+                before_entries,
+                is_cut,
+            },
+            started: false,
+            total: 0,
+            done: 0,
+            current_item: String::new(),
+        });
     }
 
     pub fn open_properties_multi(&self, paths: &[PathBuf]) {
@@ -1934,8 +2055,13 @@ impl MainWindow {
         }
 
         if updated {
-            let view = self.active_tab_mut().view_mut(side);
-            sort_files_by_keys(&mut view.files, &view.sort_keys);
+            let sort_keys = self.active_tab().view(side).sort_keys.clone();
+            let tag_counts = self.tag_counts_for_sort_keys(&sort_keys);
+            sort_files_by_keys(
+                &mut self.active_tab_mut().view_mut(side).files,
+                &sort_keys,
+                &tag_counts,
+            );
         }
         updated
     }
@@ -1995,9 +2121,11 @@ impl MainWindow {
                 }
             }
 
+            let sort_keys = self.active_tab().view(side).sort_keys.clone();
+            let tag_counts = self.tag_counts_for_sort_keys(&sort_keys);
             let view = self.active_tab_mut().view_mut(side);
             view.files.extend(batch);
-            sort_files_by_keys(&mut view.files, &view.sort_keys);
+            sort_files_by_keys(&mut view.files, &sort_keys, &tag_counts);
             any_change = true;
         }
 
@@ -2145,8 +2273,7 @@ pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer
                 | ItemViewerAction::Context(ItemViewerContextAction::Copy(_))
                 | ItemViewerAction::Context(ItemViewerContextAction::CopyPath(_))
                 | ItemViewerAction::Context(ItemViewerContextAction::Paste)
-                | ItemViewerAction::Context(ItemViewerContextAction::AddTag(_))
-                | ItemViewerAction::Context(ItemViewerContextAction::RemoveTag(_))
+                | ItemViewerAction::Context(ItemViewerContextAction::ManageTags(_))
                 | ItemViewerAction::Context(ItemViewerContextAction::RenameRequest(_, _))
                 | ItemViewerAction::Context(ItemViewerContextAction::RenameCancel) => {
                     return;
@@ -2194,6 +2321,7 @@ pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer
                         &mut explorer.settings_window.current_settings.directory_settings,
                         snapshot,
                     );
+                    explorer.save_app_settings_to_disk();
                 }
             }
             ItemViewerAction::FitColumn(column) => {
@@ -2248,6 +2376,7 @@ pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer
                         &mut explorer.settings_window.current_settings.directory_settings,
                         snapshot,
                     );
+                    explorer.save_app_settings_to_disk();
                 }
             }
             ItemViewerAction::MoveColumnRight(column) => {
@@ -2275,6 +2404,7 @@ pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer
                         &mut explorer.settings_window.current_settings.directory_settings,
                         snapshot,
                     );
+                    explorer.save_app_settings_to_disk();
                 }
             }
             ItemViewerAction::MoveColumnToStart(column) => {
@@ -2306,6 +2436,7 @@ pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer
                         &mut explorer.settings_window.current_settings.directory_settings,
                         snapshot,
                     );
+                    explorer.save_app_settings_to_disk();
                 }
             }
             ItemViewerAction::MoveColumnToEnd(column) => {
@@ -2337,6 +2468,7 @@ pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer
                         &mut explorer.settings_window.current_settings.directory_settings,
                         snapshot,
                     );
+                    explorer.save_app_settings_to_disk();
                 }
             }
             ItemViewerAction::Select(path) => {
@@ -2660,6 +2792,88 @@ pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer
             }
         }
     }
+}
+
+/// Modal progress window for an in-flight background file operation (delete /
+/// move / copy). Mirrors the tag popups: a dimming backdrop plus a centered,
+/// non-collapsible window. The title comes from `state.title_key`.
+pub fn draw_file_op_window(
+    ctx: &egui::Context,
+    i18n: &I18n,
+    palette: &ThemePalette,
+    state: &FileOpState,
+) {
+    egui::Area::new(egui::Id::new("file_op_modal_bg"))
+        .order(egui::Order::Middle)
+        .interactable(true)
+        .show(ctx, |ui| {
+            let rect = ctx.content_rect();
+            ui.painter()
+                .rect_filled(rect, 0.0, palette.modal_background_effect_color);
+        });
+
+    egui::Window::new(i18n.tr(state.title_key))
+        .collapsible(false)
+        .resizable(false)
+        .default_width(420.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .frame(
+            egui::Frame::popup(&ctx.style_of(ctx.theme()))
+                .corner_radius(egui::CornerRadius::same(8)),
+        )
+        .show(ctx, |ui| {
+            let mut style = (**ui.style()).clone();
+            style.text_styles = [
+                (egui::TextStyle::Heading, egui::FontId::proportional(14.0)),
+                (
+                    egui::TextStyle::Body,
+                    egui::FontId::proportional(palette.text_size),
+                ),
+                (
+                    egui::TextStyle::Button,
+                    egui::FontId::proportional(palette.text_size),
+                ),
+                (
+                    egui::TextStyle::Small,
+                    egui::FontId::proportional(palette.text_size),
+                ),
+            ]
+            .into();
+            ui.set_style(style);
+            ui.set_width(380.0);
+
+            if state.total > 0 {
+                let fraction = (state.done as f32 / state.total as f32).clamp(0.0, 1.0);
+                ui.add(
+                    egui::ProgressBar::new(fraction)
+                        .desired_height(20.0)
+                        .text(format!("{} / {}", state.done, state.total)),
+                );
+            } else {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(i18n.tr("delete_progress_working"));
+                });
+            }
+
+            if !state.current_item.is_empty() {
+                ui.add_space(6.0);
+                let name = Path::new(&state.current_item)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| state.current_item.clone());
+                ui.label(
+                    egui::RichText::new(name)
+                        .size(palette.text_size)
+                        .color(palette.text_normal.linear_multiply(0.85)),
+                );
+            }
+
+            ui.add_space(12.0);
+            if ui.button(i18n.tr("cancel")).clicked() {
+                state.cancel.store(true, Ordering::Relaxed);
+            }
+        });
 }
 
 pub fn handle_draw_customizetheme_window(

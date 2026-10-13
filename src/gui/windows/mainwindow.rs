@@ -7,12 +7,14 @@ use crate::gui::icons::IconCache;
 use crate::gui::theme::{
     ThemeMode, apply_font_to_context, apply_theme, get_default_palette, get_palette, set_palette,
 };
+use crate::gui::utils::{SortColumn, sort_files_by_keys};
 use crate::gui::windows::containers::enums::ItemViewerAction;
 use crate::gui::windows::containers::explorer::draw_tab_content;
 use crate::gui::windows::containers::sidebar::draw_sidebar;
 use crate::gui::windows::containers::structs::{
-    FavoriteItem, ItemViewerColumnState, ItemViewerFolderSizeState, ItemViewerNavBarAction,
-    RenameState, SidebarAction, SplitSide, TabInfo, TabState, TabsAction, TagsState,
+    FavoriteItem, FileOpState, ItemViewerColumnState, ItemViewerFolderSizeState,
+    ItemViewerNavBarAction, RenameState, SidebarAction, SplitSide, TabInfo, TabState, TabsAction,
+    TagsState,
 };
 use crate::gui::windows::containers::tabs::draw_tabs;
 use crate::gui::windows::containers::tags::{
@@ -20,7 +22,7 @@ use crate::gui::windows::containers::tags::{
 };
 use crate::gui::windows::containers::topbar::draw_topbar;
 use crate::gui::windows::mainwindow_imp::{
-    apply_directory_settings_to_view, directory_settings_snapshot_for_view,
+    apply_directory_settings_to_view, directory_settings_snapshot_for_view, draw_file_op_window,
     handle_draw_customizetheme_window, handle_pending_actions, persist_directory_settings_snapshot,
 };
 use crate::gui::windows::structs::{
@@ -70,6 +72,7 @@ pub struct MainWindow {
     pub(crate) dragdrop: Option<Box<dyn DragDropBackend>>,
     pub(crate) file_type_cache: HashMap<String, String>,
     pub(crate) tags_state: TagsState,
+    pub(crate) file_op: Option<FileOpState>,
     pub(crate) clipboard_paths: Vec<PathBuf>,
     pub(crate) clipboard_set: HashSet<PathBuf>,
     pub(crate) clipboard_is_cut: bool,
@@ -217,6 +220,7 @@ impl Default for MainWindow {
             tags_state: load_tags()
                 .map(TagsState::from_snapshot)
                 .unwrap_or_default(),
+            file_op: None,
             theme_customizer: Default::default(),
             settings_window: Default::default(),
             about_window: Default::default(),
@@ -1078,6 +1082,7 @@ impl eframe::App for MainWindow {
             .is_some();
 
         self.handle_directory_batch_recieve(ui.ctx());
+        self.handle_file_op_progress(ui.ctx());
         self.handle_directory_size_updates(ui.ctx());
         self.handle_throttle_size_requests(ui.ctx());
         self.handle_topbar_action(topbar_action);
@@ -1145,6 +1150,11 @@ impl eframe::App for MainWindow {
         if draw_tag_picker_popup(ui.ctx(), &self.i18n, &palette, &mut self.tags_state) {
             tags_changed = true;
         }
+        if let Some(state) = &self.file_op {
+            if state.started {
+                draw_file_op_window(ui.ctx(), &self.i18n, &palette, state);
+            }
+        }
         handle_draw_customizetheme_window(
             &mut self.i18n,
             ui.ctx(),
@@ -1159,6 +1169,23 @@ impl eframe::App for MainWindow {
 
         if tags_changed {
             self.persist_tags();
+
+            // Re-sort views if they're sorted by Tags
+            for side in [SplitSide::Primary, SplitSide::Secondary] {
+                if side == SplitSide::Secondary && self.active_tab().split_view.is_none() {
+                    continue;
+                }
+
+                let sort_keys = self.active_tab().view(side).sort_keys.clone();
+                if sort_keys.iter().any(|key| key.column == SortColumn::Tags) {
+                    let tag_counts = self.tag_counts_for_sort_keys(&sort_keys);
+                    sort_files_by_keys(
+                        &mut self.active_tab_mut().view_mut(side).files,
+                        &sort_keys,
+                        &tag_counts,
+                    );
+                }
+            }
         }
 
         // ✅ Step 5: Apply Deferred Refresh (IMPORTANT)
