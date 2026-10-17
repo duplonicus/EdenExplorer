@@ -332,6 +332,8 @@ fn custom_folder_icon(name: &str) -> Option<&'static str> {
         "backup" | "backups" => regular::CLOCK_COUNTER_CLOCKWISE,
         "archive" | "archives" => regular::ARCHIVE,
         "torrents" => regular::MAGNET,
+        "portable apps" => regular::SUITCASE,
+        "exocharts" | "ta-lib" | "charts" | "trading" => regular::CHART_LINE_UP,
         "credentials" | "keys" => regular::KEY,
         "dropbox" | "google drive" | "icloud drive" => regular::CLOUD,
         // Games
@@ -359,10 +361,15 @@ fn custom_folder_icon(name: &str) -> Option<&'static str> {
         "logs" | "perflogs" => regular::SCROLL,
         "temp" | "tmp" => regular::HOURGLASS,
         "recovery" => regular::LIFEBUOY,
-        "$recycle.bin" => regular::TRASH,
+        "startup" => regular::POWER,
+        "system volume information" => regular::LOCK,
+        "apcpowerchuteconfig" => regular::BATTERY_CHARGING,
+        "$recycle.bin" | "trash" => regular::TRASH,
         // "dev.win", "dev stuff"; "OneDrive - Company" for work accounts
         _ if name.starts_with("dev.") || name.starts_with("dev ") => regular::TERMINAL_WINDOW,
         _ if name.starts_with("onedrive") => regular::CLOUD,
+        // Linux and macOS trash folders: ".Trash", ".Trash-1000"
+        _ if name.starts_with(".trash") => regular::TRASH,
         _ => return None,
     };
 
