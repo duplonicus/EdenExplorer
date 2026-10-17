@@ -109,6 +109,16 @@ pub fn handle_context_menu_actions(
     context_paths.dedup();
 
     if is_drive_view {
+        if context_paths.len() == 1
+            && crate::core::iso::is_ejectable_drive(&context_paths[0])
+            && ui.button(i18n.tr("context_eject")).clicked()
+        {
+            *action = Some(ItemViewerAction::Context(ItemViewerContextAction::Eject(
+                context_paths[0].clone(),
+            )));
+            ui.close();
+        }
+
         if ui.button(i18n.tr("properties")).clicked() {
             *action = Some(ItemViewerAction::Context(
                 ItemViewerContextAction::Properties(context_paths.clone()),
@@ -210,6 +220,16 @@ pub fn handle_context_menu_actions(
     {
         let paths: Vec<PathBuf> = explorer_state.selected_paths.iter().cloned().collect();
         *action = Some(ItemViewerAction::OpenWithDefault(paths));
+        ui.close();
+    }
+
+    if context_paths.len() == 1
+        && crate::core::iso::is_iso(&context_paths[0])
+        && ui.button(i18n.tr("context_mount")).clicked()
+    {
+        *action = Some(ItemViewerAction::Context(ItemViewerContextAction::Mount(
+            context_paths[0].clone(),
+        )));
         ui.close();
     }
 
