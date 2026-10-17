@@ -393,7 +393,7 @@ fn custom_folder_icon(name: &str) -> Option<&'static str> {
         "comfyui" => regular::GRAPH,
         "huggingface" => regular::SMILEY,
         "models" => regular::BRAIN,
-        "triton" => regular::GRAPHICS_CARD,
+        "triton" | "quadrants_cache" => regular::GRAPHICS_CARD,
         // System
         "users" => regular::USERS,
         "public" => regular::GLOBE,
@@ -408,7 +408,7 @@ fn custom_folder_icon(name: &str) -> Option<&'static str> {
         "temp" | "tmp" => regular::HOURGLASS,
         "recovery" => regular::LIFEBUOY,
         "startup" => regular::POWER,
-        "system volume information" => regular::LOCK,
+        "system volume information" | "inetpub" => regular::LOCK,
         "apcpowerchuteconfig" => regular::BATTERY_CHARGING,
         "$recycle.bin" => regular::TRASH,
         // Hidden links Windows keeps for old programs
