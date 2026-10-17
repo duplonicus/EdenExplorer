@@ -304,14 +304,14 @@ fn custom_folder_icon(name: &str) -> Option<&'static str> {
     let name = name.trim().to_ascii_lowercase();
 
     let icon = match name.as_str() {
-        "music" => regular::MUSIC_NOTES,
-        "pictures" | "photos" => regular::IMAGE,
+        "music" | "my music" => regular::MUSIC_NOTES,
+        "pictures" | "my pictures" | "photos" => regular::IMAGE,
         "screenshots" => regular::CAMERA,
-        "videos" => regular::VIDEO_CAMERA,
+        "videos" | "my videos" => regular::VIDEO_CAMERA,
         "movies" => regular::FILM_STRIP,
         "recordings" => regular::MICROPHONE,
         "downloads" => regular::DOWNLOAD_SIMPLE,
-        "documents" => regular::FILE_TEXT,
+        "documents" | "my documents" => regular::FILE_TEXT,
         "desktop" => regular::MONITOR,
         "phone" => regular::DEVICE_MOBILE,
         "games" | "saved games" | "my games" => regular::JOYSTICK,
