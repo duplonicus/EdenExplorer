@@ -301,21 +301,40 @@ fn icon_to_rgba(icon: HICON) -> Option<(Vec<u8>, u32, u32)> {
 }
 
 fn custom_folder_icon(name: &str) -> Option<&'static str> {
-    if name.eq_ignore_ascii_case("Music") {
-        Some(regular::MUSIC_NOTES)
-    } else if name.eq_ignore_ascii_case("Pictures") {
-        Some(regular::IMAGE)
-    } else if name.eq_ignore_ascii_case("Videos") {
-        Some(regular::VIDEO_CAMERA)
-    } else if name.eq_ignore_ascii_case("Downloads") {
-        Some(regular::DOWNLOAD_SIMPLE)
-    } else if name.eq_ignore_ascii_case("Documents") {
-        Some(regular::FILE_TEXT)
-    } else if name.eq_ignore_ascii_case("Desktop") {
-        Some(regular::MONITOR)
-    } else if name.eq_ignore_ascii_case("Phone") {
-        Some(regular::DEVICE_MOBILE)
-    } else {
-        None
-    }
+    let name = name.trim().to_ascii_lowercase();
+
+    let icon = match name.as_str() {
+        "music" => regular::MUSIC_NOTES,
+        "pictures" | "photos" => regular::IMAGE,
+        "screenshots" => regular::CAMERA,
+        "videos" => regular::VIDEO_CAMERA,
+        "movies" => regular::FILM_STRIP,
+        "recordings" => regular::MICROPHONE,
+        "downloads" => regular::DOWNLOAD_SIMPLE,
+        "documents" => regular::FILE_TEXT,
+        "desktop" => regular::MONITOR,
+        "phone" => regular::DEVICE_MOBILE,
+        "games" | "saved games" | "my games" => regular::JOYSTICK,
+        "dev" | "development" => regular::TERMINAL_WINDOW,
+        "projects" | "repos" | "source" | "code" => regular::CODE,
+        "favorites" => regular::STAR,
+        "links" => regular::LINK,
+        "contacts" => regular::ADDRESS_BOOK,
+        "searches" => regular::MAGNIFYING_GLASS,
+        "3d objects" => regular::CUBE,
+        "dropbox" | "google drive" | "icloud drive" => regular::CLOUD,
+        "books" | "ebooks" => regular::BOOKS,
+        "work" => regular::BRIEFCASE,
+        "school" => regular::GRADUATION_CAP,
+        "backup" | "backups" => regular::CLOCK_COUNTER_CLOCKWISE,
+        "archive" | "archives" => regular::ARCHIVE,
+        "fonts" => regular::TEXT_AA,
+        "apps" | "programs" => regular::APP_WINDOW,
+        // "dev.win", "dev stuff"; "OneDrive - Company" for work accounts
+        _ if name.starts_with("dev.") || name.starts_with("dev ") => regular::TERMINAL_WINDOW,
+        _ if name.starts_with("onedrive") => regular::CLOUD,
+        _ => return None,
+    };
+
+    Some(icon)
 }
