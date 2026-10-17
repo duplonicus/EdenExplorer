@@ -12,7 +12,8 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
     FindFirstVolumeW, FindNextVolumeW, FindVolumeClose, GetDiskFreeSpaceExW, GetDriveTypeW,
-    GetLogicalDrives, GetVolumeInformationW, GetVolumePathNamesForVolumeNameW, OPEN_EXISTING,
+    GetLogicalDrives, GetVolumeInformationW, GetVolumePathNamesForVolumeNameW,
+    IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, OPEN_EXISTING,
 };
 use windows::Win32::System::IO::DeviceIoControl;
 use windows::Win32::System::Ioctl::*;
@@ -304,6 +305,62 @@ fn list_unmounted_volumes() -> Vec<RawDriveInfo> {
     volumes
 }
 
+/// Physical disk numbers that back the volume mounted at `letter` (e.g. 'C'),
+/// so raw-drive detection can skip disks that already have a drive letter.
+fn disk_numbers_for_letter(letter: char) -> Vec<u32> {
+    let path = format!("\\\\.\\{}:", letter);
+    let wide_path: Vec<u16> = OsString::from(&path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        // Zero access rights: enough for the IOCTL, and never touches the media.
+        let handle = match CreateFileW(
+            PCWSTR(wide_path.as_ptr()),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        ) {
+            Ok(h) => h,
+            Err(_) => return Vec::new(),
+        };
+
+        // u64 buffer keeps the struct's i64 fields aligned; room for 32 extents.
+        let mut buffer = vec![
+            0u64;
+            (size_of::<VOLUME_DISK_EXTENTS>() + 31 * size_of::<DISK_EXTENT>())
+                .div_ceil(size_of::<u64>())
+        ];
+        let mut bytes_returned: u32 = 0;
+        let ok = DeviceIoControl(
+            handle,
+            IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+            None,
+            0,
+            Some(buffer.as_mut_ptr() as *mut _),
+            (buffer.len() * size_of::<u64>()) as u32,
+            Some(&mut bytes_returned as *mut _),
+            None,
+        )
+        .is_ok();
+        let _ = CloseHandle(handle);
+
+        if !ok {
+            return Vec::new();
+        }
+
+        let extents = &*(buffer.as_ptr() as *const VOLUME_DISK_EXTENTS);
+        let first = extents.Extents.as_ptr();
+        (0..extents.NumberOfDiskExtents.min(32) as usize)
+            .map(|i| (*first.add(i)).DiskNumber)
+            .collect()
+    }
+}
+
 pub fn get_drive_infos() -> Vec<DriveInfo> {
     let mut cache = DRIVE_CACHE.lock().unwrap();
 
@@ -330,6 +387,8 @@ pub fn get_drive_infos() -> Vec<DriveInfo> {
 fn get_drive_infos_internal() -> Vec<DriveInfo> {
     let mut drives = Vec::new();
     let mut drive_labels: Vec<String> = Vec::new();
+    let mut lettered_disks: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut drive_paths: Vec<String> = Vec::new();
     let removable_devices = list_removable_devices();
 
     unsafe {
@@ -338,6 +397,7 @@ fn get_drive_infos_internal() -> Vec<DriveInfo> {
             if (mask >> i) & 1 == 1 {
                 let letter = (b'A' + i as u8) as char;
                 let drive_path = format!("{}:\\", letter);
+                drive_paths.push(drive_path.to_ascii_lowercase());
                 let wide_path: Vec<u16> = OsString::from(&drive_path)
                     .encode_wide()
                     .chain(std::iter::once(0))
@@ -345,6 +405,7 @@ fn get_drive_infos_internal() -> Vec<DriveInfo> {
                 let pcw_path = PCWSTR(wide_path.as_ptr());
 
                 let drive_type = GetDriveTypeW(pcw_path);
+                lettered_disks.extend(disk_numbers_for_letter(letter));
                 let mut is_removable = matches!(drive_type, DRIVE_REMOVABLE | DRIVE_CDROM);
                 let mut device_path = None;
 
@@ -364,6 +425,12 @@ fn get_drive_infos_internal() -> Vec<DriveInfo> {
                 let (total_space, free_space) = get_drive_space(&PathBuf::from(&drive_path))
                     .map(|(t, f)| (Some(t), Some(f)))
                     .unwrap_or((None, None));
+
+                // Hide empty removable slots (e.g. card readers with no card), like
+                // Explorer does. WM_DEVICECHANGE refreshes the list when media is inserted.
+                if drive_type == DRIVE_REMOVABLE && total_space.is_none() {
+                    continue;
+                }
 
                 // Volume label
                 let mut volume_name_buffer = [0u16; 256];
@@ -416,12 +483,16 @@ fn get_drive_infos_internal() -> Vec<DriveInfo> {
         .map(|s| s.to_ascii_lowercase())
         .collect();
 
+    // Windows also exposes removable volumes as portable devices, named after
+    // their label or, when unlabeled, their drive path (e.g. "F:\"). Skip both,
+    // including letters hidden above as empty.
     drives.extend(
         list_portable_devices_with_ids()
             .into_iter()
             .filter(|(name, _)| {
                 let name_l = name.to_ascii_lowercase();
                 !drive_labels.iter().any(|label| label == &name_l)
+                    && !drive_paths.iter().any(|path| path == &name_l)
             })
             .map(|(name, device_id)| DriveInfo {
                 display: name.clone(),
@@ -459,6 +530,18 @@ fn get_drive_infos_internal() -> Vec<DriveInfo> {
         .collect();
 
     for raw in list_raw_drives().into_iter().filter(|r| r.is_removable) {
+        // Skip disks that already show up under a drive letter (e.g. NTFS USB
+        // drives), and empty slots such as card readers with no card inserted.
+        let disk_number = raw
+            .device_path
+            .strip_prefix(r"\\.\PhysicalDrive")
+            .and_then(|n| n.parse::<u32>().ok());
+        if disk_number.is_some_and(|n| lettered_disks.contains(&n))
+            || raw.total_bytes.unwrap_or(0) == 0
+        {
+            continue;
+        }
+
         let path_str = raw.device_path.to_ascii_lowercase();
         if existing_paths.contains(&path_str) {
             continue;
