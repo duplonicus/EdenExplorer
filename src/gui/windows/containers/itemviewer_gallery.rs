@@ -581,6 +581,20 @@ fn draw_gallery_tile(
                 egui::Color32::WHITE
             },
         );
+    } else if let Some(glyph) = icon_cache.get_custom_folder_icon(&file.path, file.is_dir) {
+        let icon_size = (thumb_size * 0.35).clamp(24.0, 80.0);
+
+        preview_painter.text(
+            preview_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            glyph,
+            FontId::proportional(icon_size),
+            if is_cut {
+                palette.icon_colored_hover.linear_multiply(0.45)
+            } else {
+                palette.icon_colored_hover
+            },
+        );
     } else if let Some(icon) = icon_cache.get(&file.path, file.is_dir) {
         let icon_size = (thumb_size * 0.35).clamp(24.0, 80.0);
 
