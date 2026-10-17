@@ -304,14 +304,16 @@ fn icon_to_rgba(icon: HICON) -> Option<(Vec<u8>, u32, u32)> {
 }
 
 fn custom_folder_icon(name: &str) -> Option<&'static str> {
-    let name = name.trim().to_ascii_lowercase();
+    let lower = name.trim().to_ascii_lowercase();
+    // ".config" matches "config", ".ollama" matches "ollama", and so on.
+    let name = lower.trim_start_matches('.');
 
-    let icon = match name.as_str() {
+    let icon = match name {
         // Media
         "music" | "my music" | "songs" => regular::MUSIC_NOTES,
         "pictures" | "my pictures" | "photos" | "images" => regular::IMAGE,
         "wallpapers" => regular::IMAGE_SQUARE,
-        "screenshots" | "steam screenshots" | "dcim" => regular::CAMERA,
+        "screenshots" | "steam screenshots" | "dcim" | "ansel" => regular::CAMERA,
         "videos" | "my videos" | "captures" => regular::VIDEO_CAMERA,
         "movies" => regular::FILM_STRIP,
         "recordings" | "recording" | "sound recordings" => regular::MICROPHONE,
@@ -321,14 +323,13 @@ fn custom_folder_icon(name: &str) -> Option<&'static str> {
         "books" | "ebooks" => regular::BOOKS,
         "media" => regular::PLAY_CIRCLE,
         "guitar" => regular::GUITAR,
-        "ansel" => regular::CAMERA,
         // Personal folders
         "downloads" | "download" => regular::DOWNLOAD_SIMPLE,
         "documents" | "my documents" | "docs" => regular::FILE_TEXT,
         "desktop" => regular::MONITOR,
         "phone" => regular::DEVICE_MOBILE,
         "crossdevice" => regular::DEVICES,
-        "notes" | "notebooks" => regular::NOTEBOOK,
+        "notes" | "notebooks" | "jupyter" => regular::NOTEBOOK,
         "favorites" => regular::STAR,
         "links" => regular::LINK,
         "contacts" => regular::ADDRESS_BOOK,
@@ -343,10 +344,15 @@ fn custom_folder_icon(name: &str) -> Option<&'static str> {
         "sharex" => regular::SELECTION,
         "obsidian" => regular::DIAMOND,
         "exocharts" | "ta-lib" | "charts" | "trading" => regular::CHART_LINE_UP,
-        "credentials" | "keys" => regular::KEY,
-        "dropbox" | "google drive" | "icloud drive" => regular::CLOUD,
+        "matplotlib" | "cufflinks" => regular::CHART_LINE,
+        "credentials" | "keys" | "ssh" => regular::KEY,
+        "1password" => regular::PASSWORD,
+        "dropbox" | "google drive" | "icloud drive" | "azure" => regular::CLOUD,
+        "aws" => regular::AMAZON_LOGO,
+        "astropy" | "openplanetnext" => regular::PLANET,
+        "emissary" => regular::DETECTIVE,
         // Games
-        "games" | "saved games" | "my games" | "xboxgames" => regular::JOYSTICK,
+        "games" | "saved games" | "my games" | "xboxgames" | "insomniac" => regular::JOYSTICK,
         "steam" | "steamapps" | "steamlibrary" => regular::STEAM_LOGO,
         "saves" => regular::FLOPPY_DISK,
         "mods" | "plugins" | "extensions" => regular::PUZZLE_PIECE,
@@ -357,29 +363,45 @@ fn custom_folder_icon(name: &str) -> Option<&'static str> {
         "scripts" => regular::FILE_CODE,
         "windowspowershell" | "powershell" => regular::TERMINAL,
         "crash_dumps" | "crashdumps" | "crash dumps" => regular::BUG,
-        "git" => regular::GIT_BRANCH,
+        "git" | "gk" => regular::GIT_BRANCH,
         "test" | "tests" => regular::FLASK,
         "data" | "db" | "databases" => regular::DATABASE,
-        "models" => regular::BRAIN,
+        "installers" | "packages" | "node_modules" | "cargo" | "chocolatey" | "nuget"
+        | "pnpm-store" => regular::PACKAGE,
+        "docker" => regular::SHIPPING_CONTAINER,
+        "dotnet" => regular::FILE_C_SHARP,
+        "ipython" | "pyenv" => regular::FILE_PY,
+        "openjfx" => regular::COFFEE,
+        "m2" => regular::FEATHER,
+        "gradle" => regular::HAMMER,
+        "rustup" => regular::WRENCH,
+        "streamlit" => regular::CROWN,
+        "wdm" => regular::BROWSER,
         "apk" | "apks" | "android" => regular::ANDROID_LOGO,
         "app" | "applications" => regular::APP_WINDOW,
         "toolkits" | "toolkit" => regular::TOOLBOX,
-        "vm" | "vms" => regular::DESKTOP_TOWER,
+        "vm" | "vms" | "virtualbox" => regular::DESKTOP_TOWER,
         "ghidra" => regular::BINARY,
+        "antigravity" => regular::ROCKET,
+        "kiro" => regular::GHOST,
         // AI tools
-        "ai" | "claude" | ".claude" | "anthropic" | "cowork" | "perplexity" => regular::ROBOT,
+        "ai" | "claude" | "anthropic" | "cowork" | "perplexity" | "continue" | "copilot"
+        | "lmstudio" => regular::ROBOT,
         "openai" | "chatgpt" | "gpt stuff" => regular::OPEN_AI_LOGO,
         "gemini" => regular::SPARKLE,
         "ollama" => regular::HORSE,
         "comfyui" => regular::GRAPH,
         "huggingface" => regular::SMILEY,
-        "installers" | "packages" | "node_modules" => regular::PACKAGE,
+        "models" => regular::BRAIN,
+        "triton" => regular::GRAPHICS_CARD,
         // System
         "users" => regular::USERS,
         "public" => regular::GLOBE,
         "windows" => regular::WINDOWS_LOGO,
         "apps" | "programs" | "program files" | "program files (x86)" => regular::APP_WINDOW,
         "appdata" | "programdata" | "config" => regular::GEAR_SIX,
+        "local" => regular::HARD_DRIVE,
+        "cache" => regular::LIGHTNING,
         "drivers" => regular::CPU,
         "fonts" => regular::TEXT_AA,
         "logs" | "perflogs" => regular::SCROLL,
@@ -388,21 +410,24 @@ fn custom_folder_icon(name: &str) -> Option<&'static str> {
         "startup" => regular::POWER,
         "system volume information" => regular::LOCK,
         "apcpowerchuteconfig" => regular::BATTERY_CHARGING,
-        "$recycle.bin" | "trash" => regular::TRASH,
+        "$recycle.bin" => regular::TRASH,
         // Hidden links Windows keeps for old programs
         "nethood" => regular::NETWORK,
         "recent" => regular::CLOCK,
         "start menu" => regular::SQUARES_FOUR,
-        "templates" => regular::FILE_DASHED,
+        "templates" | "templateengine" => regular::FILE_DASHED,
+        "cookies" => regular::COOKIE,
+        "sendto" => regular::PAPER_PLANE_TILT,
         // "dev.win", "dev stuff"; "OneDrive - Company" for work accounts
         _ if name.starts_with("dev.") || name.starts_with("dev ") => regular::TERMINAL_WINDOW,
         _ if name.starts_with("onedrive") => regular::CLOUD,
-        _ if name.starts_with("vscode") || name.starts_with(".vscode") => regular::TERMINAL_WINDOW,
+        _ if name.starts_with("vscode") => regular::TERMINAL_WINDOW,
+        _ if name.starts_with("cursor") => regular::CURSOR,
         _ if name.starts_with("searx") => regular::MAGNIFYING_GLASS,
+        // "trash", and Linux/macOS ".Trash", ".Trash-1000"
+        _ if name.starts_with("trash") => regular::TRASH,
         _ if name.contains("backup") => regular::CLOCK_COUNTER_CLOCKWISE,
         _ if name.contains("settings") => regular::GEAR_SIX,
-        // Linux and macOS trash folders: ".Trash", ".Trash-1000"
-        _ if name.starts_with(".trash") => regular::TRASH,
         _ => return None,
     };
 
