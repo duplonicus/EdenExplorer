@@ -42,6 +42,12 @@ use windows::Win32::Foundation::{POINT, RECT};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, GetCursorPos};
 
+/// Results of background ISO mounts: the mounted drive root, or an error.
+pub(crate) type IsoMountChannel = (
+    crossbeam_channel::Sender<Result<PathBuf, String>>,
+    crossbeam_channel::Receiver<Result<PathBuf, String>>,
+);
+
 pub struct MainWindow {
     // MainWindow General Variables
     pub(crate) theme: ThemeMode,
@@ -73,6 +79,7 @@ pub struct MainWindow {
     pub(crate) file_type_cache: HashMap<String, String>,
     pub(crate) tags_state: TagsState,
     pub(crate) file_op: Option<FileOpState>,
+    pub(crate) iso_mount: IsoMountChannel,
     pub(crate) clipboard_paths: Vec<PathBuf>,
     pub(crate) clipboard_set: HashSet<PathBuf>,
     pub(crate) clipboard_is_cut: bool,
@@ -221,6 +228,7 @@ impl Default for MainWindow {
                 .map(TagsState::from_snapshot)
                 .unwrap_or_default(),
             file_op: None,
+            iso_mount: crossbeam_channel::unbounded(),
             theme_customizer: Default::default(),
             settings_window: Default::default(),
             about_window: Default::default(),
@@ -1083,6 +1091,7 @@ impl eframe::App for MainWindow {
 
         self.handle_directory_batch_recieve(ui.ctx());
         self.handle_file_op_progress(ui.ctx());
+        self.handle_iso_mount_results();
         self.handle_directory_size_updates(ui.ctx());
         self.handle_throttle_size_requests(ui.ctx());
         self.handle_topbar_action(topbar_action);

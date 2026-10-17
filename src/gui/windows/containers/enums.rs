@@ -69,5 +69,7 @@ pub enum ItemViewerContextAction {
     RenameRequest(PathBuf, String),
     RenameCancel,
     Delete(Vec<PathBuf>),
+    Mount(PathBuf),
+    Eject(PathBuf),
     Properties(Vec<PathBuf>),
 }
