@@ -42,6 +42,8 @@ pub struct IconCache {
     #[allow(dead_code)]
     icon_indices: Arc<Mutex<HashMap<IconKey, i32>>>,
     sender: Sender<IconRequest>,
+    // Looked up once: the home check runs for every folder on every frame.
+    home_dir: Option<PathBuf>,
 }
 
 impl IconCache {
@@ -120,6 +122,7 @@ impl IconCache {
             textures,
             icon_indices,
             sender: tx,
+            home_dir: dirs::home_dir(),
         }
     }
 
@@ -146,7 +149,7 @@ impl IconCache {
             return None;
         }
 
-        if dirs::home_dir().is_some_and(|home| home == path) {
+        if self.home_dir.as_deref() == Some(path) {
             return Some(regular::HOUSE);
         }
 
