@@ -146,6 +146,10 @@ impl IconCache {
             return None;
         }
 
+        if dirs::home_dir().is_some_and(|home| home == path) {
+            return Some(regular::HOUSE);
+        }
+
         let name = path.file_name()?.to_str()?;
 
         custom_folder_icon(name)
@@ -307,6 +311,10 @@ fn custom_folder_icon(name: &str) -> Option<&'static str> {
         Some(regular::DOWNLOAD_SIMPLE)
     } else if name.eq_ignore_ascii_case("Documents") {
         Some(regular::FILE_TEXT)
+    } else if name.eq_ignore_ascii_case("Desktop") {
+        Some(regular::MONITOR)
+    } else if name.eq_ignore_ascii_case("Phone") {
+        Some(regular::DEVICE_MOBILE)
     } else {
         None
     }
