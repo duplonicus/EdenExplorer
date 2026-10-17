@@ -77,6 +77,7 @@
 <ul>
   <li><b>Portable device support</b> for iPhone, Android, and other connected devices</li>
   <li><b>Raw and unmounted drive detection</b> for ISO media, Linux partitions, and other unsupported Windows filesystems</li>
+  <li><b>ISO mounting and ejecting</b> without admin rights, opening the mounted drive in the current tab</li>
   <li><b>Comprehensive drive information</b> with efficient cached storage queries</li>
   <li><b>CLI path support</b> for special Windows locations including <code>::MY_PC::</code>, <code>::RECYCLE_BIN::</code>, <code>shell:MyComputerFolder</code>, and <code>shell:RecycleBinFolder</code></li>
 </ul>

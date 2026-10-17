@@ -155,6 +155,7 @@
 - [x] **Window size customization** with fullscreen, half-screen, and custom dimension modes
 - [x] **Portable device support** for iPhone, Android, and other connected devices
 - [x] **Raw/unmounted drive detection** for ISO sticks and Linux partitions
+- [x] **ISO mounting** - Double-click or right-click → Mount to open an .iso as a drive in the current tab; Eject from This PC
 - [x] **Performance benchmarking system** with real-time measurement and comparison tools
 - [x] **Drag and drop files/folders** - Move one or more items into folders shown in the item viewer
 - [x] **Window management improvements** with proper maximization bounds and minimum size constraints
