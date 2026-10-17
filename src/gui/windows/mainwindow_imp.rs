@@ -1,10 +1,11 @@
-use crate::core::drives::{get_drive_infos, is_raw_physical_drive_path};
+use crate::core::drives::{get_drive_infos, is_raw_physical_drive_path, mark_drive_cache_dirty};
 use crate::core::fs::{FileItem, get_shell_item_metadata};
 use crate::core::fs::{MY_RECYCLE_BIN_PATH, parallel_directory_scan, scan_dir_async};
 use crate::core::indexer::{
     DirectorySettingsSnapshot, WindowSizeMode, load_app_settings, save_app_settings,
     save_favorites, save_tags, save_theme_settings,
 };
+use crate::core::iso;
 use crate::gui::MainWindow;
 use crate::gui::i18n::I18n;
 use crate::gui::theme::{
@@ -1129,9 +1130,50 @@ impl MainWindow {
                     current_item: String::new(),
                 });
             }
+            ItemViewerContextAction::Mount(path) => {
+                self.mount_iso(path);
+            }
+            ItemViewerContextAction::Eject(root) => {
+                self.eject_drive(root);
+            }
             ItemViewerContextAction::Properties(paths) => {
                 self.open_properties_multi(&paths);
             }
+        }
+    }
+
+    /// Mounts an ISO on a background thread; `handle_iso_mount_results` opens
+    /// its drive once it's ready.
+    pub fn mount_iso(&self, path: PathBuf) {
+        let tx = self.iso_mount.0.clone();
+        thread::spawn(move || {
+            let _ = tx.send(iso::mount_iso(&path));
+            crate::gui::windows::windowsoverrides::request_repaint();
+        });
+    }
+
+    pub fn handle_iso_mount_results(&mut self) {
+        while let Ok(result) = self.iso_mount.1.try_recv() {
+            match result {
+                Ok(root) => {
+                    mark_drive_cache_dirty();
+                    self.current_nav_mut().go_to(root);
+                    self.mark_tab_infos_dirty();
+                    self.load_path();
+                }
+                Err(e) => eprintln!("Failed to mount ISO: {}", e),
+            }
+        }
+    }
+
+    pub fn eject_drive(&mut self, root: PathBuf) {
+        if let Err(e) = iso::eject_drive(&root) {
+            eprintln!("Failed to eject: {}", e);
+            return;
+        }
+        mark_drive_cache_dirty();
+        if self.current_nav().is_root() {
+            self.load_path();
         }
     }
 
@@ -2270,6 +2312,8 @@ pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer
                 | ItemViewerAction::Context(ItemViewerContextAction::CopyPath(_))
                 | ItemViewerAction::Context(ItemViewerContextAction::Paste)
                 | ItemViewerAction::Context(ItemViewerContextAction::ManageTags(_))
+                | ItemViewerAction::Context(ItemViewerContextAction::Mount(_))
+                | ItemViewerAction::Context(ItemViewerContextAction::Eject(_))
                 | ItemViewerAction::Context(ItemViewerContextAction::RenameRequest(_, _))
                 | ItemViewerAction::Context(ItemViewerContextAction::RenameCancel) => {
                     return;
@@ -2616,7 +2660,14 @@ pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer
                 explorer.load_path();
             }
             ItemViewerAction::OpenWithDefault(paths) => {
+                // Like Explorer: opening an ISO mounts it when Windows is its default app.
+                let mount_isos =
+                    paths.iter().any(|p| iso::is_iso(p)) && iso::windows_mounts_iso_by_default();
                 for path in paths {
+                    if mount_isos && iso::is_iso(&path) {
+                        explorer.mount_iso(path);
+                        continue;
+                    }
                     let path_str = path.to_string_lossy().to_string();
                     let wide_path: Vec<u16> = OsStr::new(&path_str)
                         .encode_wide()
