@@ -346,7 +346,7 @@ fn custom_folder_icon(name: &str) -> Option<&'static str> {
         "exocharts" | "ta-lib" | "charts" | "trading" => regular::CHART_LINE_UP,
         "matplotlib" | "cufflinks" => regular::CHART_LINE,
         "credentials" | "keys" | "ssh" => regular::KEY,
-        "1password" => regular::PASSWORD,
+        "1password" => regular::KEYHOLE,
         "dropbox" | "google drive" | "icloud drive" | "azure" => regular::CLOUD,
         "aws" => regular::AMAZON_LOGO,
         "astropy" | "openplanetnext" => regular::PLANET,

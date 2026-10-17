@@ -564,20 +564,8 @@ fn draw_gallery_tile(
     // Clip image/icon rendering specifically to the preview rectangle.
     let preview_painter = tile_painter.with_clip_rect(preview_rect.intersect(ui.clip_rect()));
 
-    if let Some(texture) = thumbnail_service.texture_for(ui.ctx(), file) {
-        let image_rect = fit_rect(texture.size_vec2(), preview_rect);
-
-        preview_painter.image(
-            texture.id(),
-            image_rect,
-            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-            if is_cut {
-                egui::Color32::WHITE.linear_multiply(0.45)
-            } else {
-                egui::Color32::WHITE
-            },
-        );
-    } else if let Some(glyph) = icon_cache.get_custom_folder_icon(&file.path, file.is_dir) {
+    // A custom folder icon wins over Windows' folder thumbnail (a preview of the contents).
+    if let Some(glyph) = icon_cache.get_custom_folder_icon(&file.path, file.is_dir) {
         let icon_size = (thumb_size * 0.35).clamp(24.0, 80.0);
 
         preview_painter.text(
@@ -589,6 +577,19 @@ fn draw_gallery_tile(
                 palette.icon_colored_hover.linear_multiply(0.45)
             } else {
                 palette.icon_colored_hover
+            },
+        );
+    } else if let Some(texture) = thumbnail_service.texture_for(ui.ctx(), file) {
+        let image_rect = fit_rect(texture.size_vec2(), preview_rect);
+
+        preview_painter.image(
+            texture.id(),
+            image_rect,
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+            if is_cut {
+                egui::Color32::WHITE.linear_multiply(0.45)
+            } else {
+                egui::Color32::WHITE
             },
         );
     } else if let Some(icon) = icon_cache.get(&file.path, file.is_dir) {
