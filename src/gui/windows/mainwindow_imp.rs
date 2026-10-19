@@ -41,6 +41,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
@@ -188,6 +189,8 @@ impl Drop for MainWindow {
 }
 
 impl MainWindow {
+    const COLUMN_SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_secs(1);
+
     /// Comprehensive validation for submitted filenames
     /// Used when user submits/commits the filename (Enter, create new file/folder)
     fn is_submitted_filename_valid(name: &str) -> bool {
@@ -439,6 +442,30 @@ impl MainWindow {
                 .recycle_bin_column_sizes,
             &self.settings_window.current_settings.directory_settings,
         );
+    }
+
+    fn save_or_defer_column_settings_to_disk(&mut self, finished: bool) {
+        if finished {
+            self.column_settings_save_due = None;
+            self.save_app_settings_to_disk();
+        } else {
+            self.column_settings_save_due =
+                Some(Instant::now() + Self::COLUMN_SETTINGS_SAVE_DEBOUNCE);
+        }
+    }
+
+    pub(crate) fn flush_pending_column_settings_save(&mut self, ctx: &egui::Context) {
+        let Some(due) = self.column_settings_save_due else {
+            return;
+        };
+
+        let now = Instant::now();
+        if now >= due {
+            self.column_settings_save_due = None;
+            self.save_app_settings_to_disk();
+        } else {
+            ctx.request_repaint_after(due - now);
+        }
     }
 
     pub(crate) fn tag_counts_for_sort_keys(
@@ -1235,6 +1262,10 @@ impl MainWindow {
 
     fn cleanup_resources(&mut self) {
         println!("Cleaning up resources...");
+
+        if self.column_settings_save_due.take().is_some() {
+            self.save_app_settings_to_disk();
+        }
 
         // Tell background workers to exit.
         self.shutdown.store(true, Ordering::Relaxed);
@@ -2340,9 +2371,7 @@ pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer
             }
             ItemViewerAction::CreateFolder => explorer.create_new_folder(),
             ItemViewerAction::CreateFile => explorer.create_new_file(),
-            ItemViewerAction::RefreshCurrentDirectory => {
-                explorer.load_path();
-            }
+            ItemViewerAction::RefreshCurrentDirectory => explorer.load_path(),
             ItemViewerAction::OpenTerminal => {
                 let current_dir = explorer.current_nav().current.clone();
                 open_default_terminal(&current_dir);
@@ -2774,9 +2803,15 @@ pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer
                     view.explorer_state.selection_anchor = None;
                     view.explorer_state.selection_focus = None;
                 }
-                explorer.load_path();
+                // A drag between split panes is handled with focus temporarily
+                // pinned to the primary view. Refresh every visible pane so a
+                // file moved into the secondary pane appears immediately too.
+                explorer.load_view(SplitSide::Primary);
+                if explorer.active_tab().split_view.is_some() {
+                    explorer.load_view(SplitSide::Secondary);
+                }
             }
-            ItemViewerAction::ColumnSizesChanged => {
+            ItemViewerAction::ColumnSizesChanged { finished } => {
                 let snapshot =
                     directory_settings_snapshot_for_view(explorer.active_tab().view(side));
                 let _ = persist_directory_settings_snapshot(
@@ -2784,7 +2819,7 @@ pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer
                     snapshot,
                 );
 
-                explorer.save_app_settings_to_disk();
+                explorer.save_or_defer_column_settings_to_disk(finished);
             }
         }
     }
@@ -2839,12 +2874,15 @@ pub fn draw_file_op_window(
             ui.set_width(380.0);
 
             if state.total > 0 {
-                let fraction = (state.done as f32 / state.total as f32).clamp(0.0, 1.0);
-                ui.add(
-                    egui::ProgressBar::new(fraction)
-                        .desired_height(20.0)
-                        .text(format!("{} / {}", state.done, state.total)),
-                );
+                let displayed_done = state.done.min(state.total.saturating_sub(1));
+                let fraction = (displayed_done as f32 / state.total as f32).clamp(0.0, 1.0);
+                let progress = egui::ProgressBar::new(fraction)
+                    .desired_height(20.0)
+                    .text(format!("{} / {}", displayed_done, state.total));
+                let bar_width = (ui.available_width() - ui.spacing().item_spacing.x * 2.0).max(0.0);
+                ui.horizontal_centered(|ui| {
+                    ui.add_sized([bar_width, 20.0], progress);
+                });
             } else {
                 ui.horizontal(|ui| {
                     ui.spinner();
