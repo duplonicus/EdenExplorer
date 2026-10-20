@@ -155,17 +155,25 @@ impl IconCache {
 
         let name = path.file_name()?.to_str()?;
 
-        // Linux home folders, "/home/<user>"
-        if path
-            .parent()
-            .and_then(Path::file_name)
-            .is_some_and(|parent_name| parent_name == "home")
-        {
+        if is_linux_home(path) {
             return Some(regular::HOUSE);
         }
 
         custom_folder_icon(name)
     }
+}
+
+/// "/home/<user>" in WSL, reached as "W:\home\dup" or
+/// "\\wsl.localhost\Ubuntu\home\dup". "home" must sit at the root, so a
+/// project's "src\pages\home\tests" keeps its own icon.
+fn is_linux_home(path: &Path) -> bool {
+    let Some(home) = path.parent() else {
+        return false;
+    };
+    home.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("home"))
+        && home.parent().is_some_and(|root| root.parent().is_none())
 }
 
 // ---------------- helpers ----------------
@@ -474,6 +482,14 @@ fn custom_folder_icon(name: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_home_folder_at_the_root_gives_the_house() {
+        assert!(is_linux_home(Path::new(r"W:\home\dup")));
+        assert!(is_linux_home(Path::new(r"\\wsl.localhost\Ubuntu\home\dup")));
+        assert!(!is_linux_home(Path::new(r"C:\site\pages\home\tests")));
+        assert!(!is_linux_home(Path::new(r"W:\home")));
+    }
 
     #[test]
     fn linux_folders_match() {
