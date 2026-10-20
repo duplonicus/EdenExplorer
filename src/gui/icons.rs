@@ -5,7 +5,7 @@ use egui_phosphor::regular;
 use std::os::windows::ffi::OsStrExt;
 use std::{
     collections::HashMap,
-    path::{Component, Path, PathBuf, Prefix},
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
 };
@@ -153,23 +153,11 @@ impl IconCache {
             return Some(regular::HOUSE);
         }
 
-        if is_wsl_distro_root(path) {
-            return Some(regular::LINUX_LOGO);
-        }
-
         let name = path.file_name()?.to_str()?;
-        let parent = path.parent();
-
-        // Folders at the top of a Linux distro mean something else than the
-        // same name elsewhere: "/dev" is devices, "~/dev" is code.
-        if parent.is_some_and(is_wsl_distro_root)
-            && let Some(icon) = linux_root_folder_icon(name)
-        {
-            return Some(icon);
-        }
 
         // Linux home folders, "/home/<user>"
-        if parent
+        if path
+            .parent()
             .and_then(Path::file_name)
             .is_some_and(|parent_name| parent_name == "home")
         {
@@ -178,50 +166,6 @@ impl IconCache {
 
         custom_folder_icon(name)
     }
-}
-
-/// True for "\\wsl.localhost\<distro>\" and "\\wsl$\<distro>\".
-fn is_wsl_distro_root(path: &Path) -> bool {
-    if path.parent().is_some() {
-        return false;
-    }
-    match path.components().next() {
-        Some(Component::Prefix(prefix)) => match prefix.kind() {
-            Prefix::UNC(server, _) | Prefix::VerbatimUNC(server, _) => {
-                server.eq_ignore_ascii_case("wsl.localhost") || server.eq_ignore_ascii_case("wsl$")
-            }
-            _ => false,
-        },
-        _ => false,
-    }
-}
-
-fn linux_root_folder_icon(name: &str) -> Option<&'static str> {
-    // "bin.usr-is-merged" and friends are leftovers from Ubuntu's /usr merge.
-    let name = name.strip_suffix(".usr-is-merged").unwrap_or(name);
-
-    let icon = match name {
-        "bin" | "sbin" => regular::BINARY,
-        "boot" => regular::POWER,
-        "dev" => regular::PLUGS_CONNECTED,
-        "etc" => regular::GEAR_SIX,
-        "home" => regular::USERS,
-        "lib" | "lib32" | "lib64" | "libx32" => regular::STACK,
-        "lost+found" => regular::QUESTION,
-        "media" => regular::USB,
-        "mnt" => regular::HARD_DRIVES,
-        "opt" | "snap" => regular::PACKAGE,
-        "proc" => regular::PULSE,
-        "root" => regular::USER_GEAR,
-        "run" => regular::PLAY,
-        "srv" => regular::GLOBE,
-        "sys" => regular::CPU,
-        "usr" => regular::APP_WINDOW,
-        "var" => regular::DATABASE,
-        _ => return None,
-    };
-
-    Some(icon)
 }
 
 // ---------------- helpers ----------------
@@ -372,6 +316,8 @@ fn custom_folder_icon(name: &str) -> Option<&'static str> {
     let lower = name.trim().to_ascii_lowercase();
     // ".config" matches "config", ".ollama" matches "ollama", and so on.
     let name = lower.trim_start_matches('.');
+    // "bin.usr-is-merged" and friends are leftovers from Ubuntu's /usr merge.
+    let name = name.strip_suffix(".usr-is-merged").unwrap_or(name);
 
     let icon = match name {
         // Media
@@ -486,6 +432,22 @@ fn custom_folder_icon(name: &str) -> Option<&'static str> {
         "config.msi" => regular::CLOCK_COUNTER_CLOCKWISE,
         "apcpowerchuteconfig" => regular::BATTERY_CHARGING,
         "$recycle.bin" => regular::TRASH,
+        // Linux, as seen through WSL ("\\wsl.localhost\Ubuntu" or a mapped drive)
+        "home" => regular::USERS,
+        "bin" | "sbin" => regular::BINARY,
+        "boot" => regular::POWER,
+        "etc" => regular::GEAR_SIX,
+        "lib" | "lib32" | "lib64" | "libx32" => regular::STACK,
+        "lost+found" => regular::QUESTION,
+        "mnt" => regular::HARD_DRIVES,
+        "snap" => regular::PACKAGE,
+        "proc" => regular::PULSE,
+        "root" => regular::USER_GEAR,
+        "run" => regular::PLAY,
+        "srv" => regular::GLOBE,
+        "sys" => regular::CPU,
+        "usr" => regular::APP_WINDOW,
+        "var" => regular::DATABASE,
         // Hidden links Windows keeps for old programs
         "nethood" => regular::NETWORK,
         "recent" => regular::CLOCK,
@@ -514,27 +476,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wsl_distro_root_is_recognised() {
-        assert!(is_wsl_distro_root(Path::new(r"\\wsl.localhost\Ubuntu\")));
-        assert!(is_wsl_distro_root(Path::new(r"\\wsl$\Ubuntu")));
-        assert!(!is_wsl_distro_root(Path::new(
-            r"\\wsl.localhost\Ubuntu\dev"
-        )));
-        assert!(!is_wsl_distro_root(Path::new(r"\\server\share\")));
-        assert!(!is_wsl_distro_root(Path::new(r"C:\")));
-    }
-
-    #[test]
-    fn linux_root_folders_get_their_own_icons() {
+    fn linux_folders_match() {
+        assert_eq!(custom_folder_icon("etc"), Some(regular::GEAR_SIX));
         assert_eq!(
-            linux_root_folder_icon("dev"),
-            Some(regular::PLUGS_CONNECTED)
-        );
-        assert_eq!(
-            linux_root_folder_icon("bin.usr-is-merged"),
+            custom_folder_icon("bin.usr-is-merged"),
             Some(regular::BINARY)
         );
-        assert_eq!(linux_root_folder_icon("projects"), None);
     }
 
     #[test]
