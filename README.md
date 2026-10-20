@@ -108,7 +108,6 @@
 ## 🗺️ Roadmap
 
 ### 🚀 Upcoming Alpha Features
-- [ ] Add multi-tagging of objects
 - [ ] Enhanced theme customization, such as custom layouts, mix/match UI elements, styles, etc
 - [ ] Support network devices
 
@@ -179,7 +178,7 @@
 - [x] CLI now accepts `::MY_PC::`, `::RECYCLE_BIN::`, `shell:MyComputerFolder`, and `shell:RecycleBinFolder` as valid directories
 - [x] Lexicographic multi-column sorting using Shift+Click to add columns to sort rows or Ctrl+Click to remove column sorting
 - [x] Directory column sorting, sizing, and view changes persist across sessions
-
+- [x] Add multi-tagging of objects
 
 ## License
 This project is FOSS, released under the MIT License.
