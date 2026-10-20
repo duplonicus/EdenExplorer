@@ -2646,11 +2646,26 @@ pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer
             }
             ItemViewerAction::OpenWithDefault(paths) => {
                 for path in paths {
-                    let path_str = path.to_string_lossy().to_string();
-                    let wide_path: Vec<u16> = OsStr::new(&path_str)
+                    let wide_path: Vec<u16> = path
+                        .as_os_str()
                         .encode_wide()
                         .chain(std::iter::once(0))
                         .collect();
+                    // Pass the item's containing directory to the launched
+                    // process. This is especially important for scripts:
+                    // `%CD%` should refer to the folder the user opened the
+                    // script from, rather than Eden Explorer's startup
+                    // directory.
+                    let wide_working_dir = path.parent().map(|parent| {
+                        parent
+                            .as_os_str()
+                            .encode_wide()
+                            .chain(std::iter::once(0))
+                            .collect::<Vec<u16>>()
+                    });
+                    let working_dir = wide_working_dir
+                        .as_ref()
+                        .map_or(PCWSTR::null(), |directory| PCWSTR(directory.as_ptr()));
 
                     unsafe {
                         let result = ShellExecuteW(
@@ -2658,7 +2673,7 @@ pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer
                             PCWSTR::null(),
                             PCWSTR(wide_path.as_ptr()),
                             PCWSTR::null(),
-                            PCWSTR::null(),
+                            working_dir,
                             SW_SHOWNORMAL,
                         );
 
