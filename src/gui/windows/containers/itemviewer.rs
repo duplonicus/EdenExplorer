@@ -499,11 +499,17 @@ pub fn draw_item_viewer(
                         let row_resp = row.response();
 
                         if row_resp.hovered() && !is_selected {
+                            // The row response can be taller than the row, so cap it at
+                            // the row height (same as the drop target rect below).
+                            let row_rect = egui::Rect::from_min_size(
+                                row_resp.rect.min,
+                                egui::vec2(row_resp.rect.width(), layout.row_height),
+                            );
                             row_hover_painter.set(
                                 row_hover_slot,
                                 egui::epaint::RectShape::filled(
                                     egui::emath::GuiRounding::round_ui(
-                                        row_resp.rect.expand2(row_hover_expand),
+                                        row_rect.expand2(row_hover_expand),
                                     ),
                                     egui::CornerRadius::ZERO,
                                     row_hover_fill,
