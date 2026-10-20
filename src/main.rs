@@ -71,6 +71,7 @@ fn main() -> eframe::Result<()> {
             .with_title_shown(false)
             .with_decorations(false)
             .with_clamp_size_to_monitor_size(true),
+        wgpu_options: low_latency_wgpu_options(),
         ..Default::default()
     };
 
@@ -90,6 +91,41 @@ fn main() -> eframe::Result<()> {
             )))
         }),
     )
+}
+
+/// Keep the hover highlight on the cursor. With Vulkan, or with vsync and two
+/// queued frames (egui's defaults), what's on screen is several frames behind
+/// the mouse, which is easy to see when moving over the item list on a 60 Hz
+/// display. Prefer a DX12 adapter, present without vsync, and queue one frame.
+/// Eden repaints on demand, so this only costs anything while the UI changes.
+fn low_latency_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
+    use eframe::egui_wgpu::{SurfaceConfig, WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew};
+    use eframe::wgpu;
+
+    let mut setup = WgpuSetupCreateNew::without_display_handle();
+    setup.native_adapter_selector = Some(std::sync::Arc::new(|adapters, surface| {
+        adapters
+            .iter()
+            .filter(|adapter| surface.is_none_or(|surface| adapter.is_surface_supported(surface)))
+            .max_by_key(|adapter| {
+                let info = adapter.get_info();
+                (
+                    info.backend == wgpu::Backend::Dx12,
+                    info.device_type == wgpu::DeviceType::DiscreteGpu,
+                )
+            })
+            .cloned()
+            .ok_or_else(|| "no graphics adapter can present to this window".to_owned())
+    }));
+
+    WgpuConfiguration {
+        surface: SurfaceConfig {
+            present_mode: wgpu::PresentMode::AutoNoVsync,
+            desired_maximum_frame_latency: Some(1),
+        },
+        wgpu_setup: WgpuSetup::CreateNew(setup),
+        ..Default::default()
+    }
 }
 
 fn show_launch_error(error: &LaunchError) {
