@@ -5,7 +5,7 @@ use egui_phosphor::regular;
 use std::os::windows::ffi::OsStrExt;
 use std::{
     collections::HashMap,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf, Prefix},
     sync::{Arc, Mutex},
     thread,
 };
@@ -153,10 +153,75 @@ impl IconCache {
             return Some(regular::HOUSE);
         }
 
+        if is_wsl_distro_root(path) {
+            return Some(regular::LINUX_LOGO);
+        }
+
         let name = path.file_name()?.to_str()?;
+        let parent = path.parent();
+
+        // Folders at the top of a Linux distro mean something else than the
+        // same name elsewhere: "/dev" is devices, "~/dev" is code.
+        if parent.is_some_and(is_wsl_distro_root)
+            && let Some(icon) = linux_root_folder_icon(name)
+        {
+            return Some(icon);
+        }
+
+        // Linux home folders, "/home/<user>"
+        if parent
+            .and_then(Path::file_name)
+            .is_some_and(|parent_name| parent_name == "home")
+        {
+            return Some(regular::HOUSE);
+        }
 
         custom_folder_icon(name)
     }
+}
+
+/// True for "\\wsl.localhost\<distro>\" and "\\wsl$\<distro>\".
+fn is_wsl_distro_root(path: &Path) -> bool {
+    if path.parent().is_some() {
+        return false;
+    }
+    match path.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::UNC(server, _) | Prefix::VerbatimUNC(server, _) => {
+                server.eq_ignore_ascii_case("wsl.localhost") || server.eq_ignore_ascii_case("wsl$")
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn linux_root_folder_icon(name: &str) -> Option<&'static str> {
+    // "bin.usr-is-merged" and friends are leftovers from Ubuntu's /usr merge.
+    let name = name.strip_suffix(".usr-is-merged").unwrap_or(name);
+
+    let icon = match name {
+        "bin" | "sbin" => regular::BINARY,
+        "boot" => regular::POWER,
+        "dev" => regular::PLUGS_CONNECTED,
+        "etc" => regular::GEAR_SIX,
+        "home" => regular::USERS,
+        "lib" | "lib32" | "lib64" | "libx32" => regular::STACK,
+        "lost+found" => regular::QUESTION,
+        "media" => regular::USB,
+        "mnt" => regular::HARD_DRIVES,
+        "opt" | "snap" => regular::PACKAGE,
+        "proc" => regular::PULSE,
+        "root" => regular::USER_GEAR,
+        "run" => regular::PLAY,
+        "srv" => regular::GLOBE,
+        "sys" => regular::CPU,
+        "usr" => regular::APP_WINDOW,
+        "var" => regular::DATABASE,
+        _ => return None,
+    };
+
+    Some(icon)
 }
 
 // ---------------- helpers ----------------
@@ -345,12 +410,19 @@ fn custom_folder_icon(name: &str) -> Option<&'static str> {
         "obsidian" => regular::DIAMOND,
         "exocharts" | "ta-lib" | "charts" | "trading" => regular::CHART_LINE_UP,
         "matplotlib" | "cufflinks" => regular::CHART_LINE,
-        "credentials" | "keys" | "ssh" => regular::KEY,
+        "credentials" | "keys" | "ssh" | "gnupg" | "mcp-auth" => regular::KEY,
+        "secrets" => regular::LOCK_KEY,
+        "pki" => regular::CERTIFICATE,
         "1password" => regular::KEYHOLE,
         "dropbox" | "google drive" | "icloud drive" | "azure" => regular::CLOUD,
         "aws" => regular::AMAZON_LOGO,
+        "oci" => regular::CLOUD,
+        "google-cloud-sdk" => regular::GOOGLE_LOGO,
         "astropy" | "openplanetnext" => regular::PLANET,
         "emissary" => regular::DETECTIVE,
+        "paperclip" => regular::PAPERCLIP,
+        "twitter-cli" => regular::X_LOGO,
+        "landscape" => regular::MOUNTAINS,
         // Games
         "games" | "saved games" | "my games" | "xboxgames" | "insomniac" => regular::JOYSTICK,
         "steam" | "steamapps" | "steamlibrary" => regular::STEAM_LOGO,
@@ -367,7 +439,8 @@ fn custom_folder_icon(name: &str) -> Option<&'static str> {
         "test" | "tests" => regular::FLASK,
         "data" | "db" | "databases" => regular::DATABASE,
         "installers" | "packages" | "node_modules" | "cargo" | "chocolatey" | "nuget"
-        | "pnpm-store" => regular::PACKAGE,
+        | "pnpm-store" | "npm" | "opt" => regular::PACKAGE,
+        "bun" | "nvm" => regular::FILE_JS,
         "docker" => regular::SHIPPING_CONTAINER,
         "dotnet" => regular::FILE_C_SHARP,
         "ipython" | "pyenv" => regular::FILE_PY,
@@ -393,7 +466,7 @@ fn custom_folder_icon(name: &str) -> Option<&'static str> {
         "comfyui" => regular::GRAPH,
         "huggingface" => regular::SMILEY,
         "models" => regular::BRAIN,
-        "triton" | "quadrants_cache" => regular::GRAPHICS_CARD,
+        "triton" | "quadrants_cache" | "nv" => regular::GRAPHICS_CARD,
         // System
         "users" => regular::USERS,
         "public" => regular::GLOBE,
@@ -409,6 +482,8 @@ fn custom_folder_icon(name: &str) -> Option<&'static str> {
         "recovery" => regular::LIFEBUOY,
         "startup" => regular::POWER,
         "system volume information" | "inetpub" => regular::LOCK,
+        // Windows Installer's rollback files for an install in progress
+        "config.msi" => regular::CLOCK_COUNTER_CLOCKWISE,
         "apcpowerchuteconfig" => regular::BATTERY_CHARGING,
         "$recycle.bin" => regular::TRASH,
         // Hidden links Windows keeps for old programs
@@ -426,10 +501,53 @@ fn custom_folder_icon(name: &str) -> Option<&'static str> {
         _ if name.starts_with("searx") => regular::MAGNIFYING_GLASS,
         // "trash", and Linux/macOS ".Trash", ".Trash-1000"
         _ if name.starts_with("trash") => regular::TRASH,
-        _ if name.contains("backup") => regular::CLOCK_COUNTER_CLOCKWISE,
+        _ if name.contains("backup") || name.ends_with(".bak") => regular::CLOCK_COUNTER_CLOCKWISE,
         _ if name.contains("settings") => regular::GEAR_SIX,
         _ => return None,
     };
 
     Some(icon)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wsl_distro_root_is_recognised() {
+        assert!(is_wsl_distro_root(Path::new(r"\\wsl.localhost\Ubuntu\")));
+        assert!(is_wsl_distro_root(Path::new(r"\\wsl$\Ubuntu")));
+        assert!(!is_wsl_distro_root(Path::new(
+            r"\\wsl.localhost\Ubuntu\dev"
+        )));
+        assert!(!is_wsl_distro_root(Path::new(r"\\server\share\")));
+        assert!(!is_wsl_distro_root(Path::new(r"C:\")));
+    }
+
+    #[test]
+    fn linux_root_folders_get_their_own_icons() {
+        assert_eq!(
+            linux_root_folder_icon("dev"),
+            Some(regular::PLUGS_CONNECTED)
+        );
+        assert_eq!(
+            linux_root_folder_icon("bin.usr-is-merged"),
+            Some(regular::BINARY)
+        );
+        assert_eq!(linux_root_folder_icon("projects"), None);
+    }
+
+    #[test]
+    fn dot_folders_and_installer_leftovers_match() {
+        assert_eq!(custom_folder_icon(".gnupg"), Some(regular::KEY));
+        assert_eq!(
+            custom_folder_icon(".claude.bak"),
+            Some(regular::CLOCK_COUNTER_CLOCKWISE)
+        );
+        assert_eq!(
+            custom_folder_icon("Config.Msi"),
+            Some(regular::CLOCK_COUNTER_CLOCKWISE)
+        );
+        assert_eq!(custom_folder_icon("dev"), Some(regular::TERMINAL_WINDOW));
+    }
 }
