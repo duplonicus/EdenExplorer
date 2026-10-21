@@ -6,6 +6,7 @@ use crate::core::indexer::{
     save_favorites, save_tags, save_theme_settings,
 };
 use crate::core::iso;
+use crate::core::utils::widgets::ANIMATION_FRAME_INTERVAL;
 use crate::gui::MainWindow;
 use crate::gui::i18n::I18n;
 use crate::gui::theme::{
@@ -534,7 +535,7 @@ impl MainWindow {
             Outcome::Running { started } => {
                 // Keep the progress window animating while it's visible.
                 if started {
-                    ctx.request_repaint();
+                    ctx.request_repaint_after(ANIMATION_FRAME_INTERVAL);
                 }
             }
         }
