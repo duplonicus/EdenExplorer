@@ -3,6 +3,38 @@ use crate::core::utils::text::apply_eden_text_overrides;
 use crate::gui::theme::ThemePalette;
 use eframe::egui::*;
 use egui_phosphor::regular::DOTS_SIX_VERTICAL;
+use std::time::Duration;
+
+/// How often an animation (spinner, progress window) asks for its next frame.
+/// Eden presents without vsync, so `request_repaint()` every frame would run as
+/// fast as the GPU allows.
+pub const ANIMATION_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
+/// A loading spinner like `egui::Spinner`, which repaints every frame, but
+/// capped at ANIMATION_FRAME_INTERVAL.
+pub fn loading_spinner(ui: &mut Ui, size: f32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.ctx().request_repaint_after(ANIMATION_FRAME_INTERVAL);
+
+        let color = ui.visuals().strong_text_color();
+        let radius = (rect.height().min(rect.width()) / 2.0) - 2.0;
+        let n_points = (radius.round() as u32).clamp(8, 128);
+        let time = ui.input(|i| i.time);
+        let start_angle = time * std::f64::consts::TAU;
+        let end_angle = start_angle + 240f64.to_radians() * time.sin();
+        let points: Vec<Pos2> = (0..n_points)
+            .map(|i| {
+                let angle = emath::lerp(start_angle..=end_angle, i as f64 / n_points as f64);
+                let (sin, cos) = angle.sin_cos();
+                rect.center() + radius * vec2(cos as f32, sin as f32)
+            })
+            .collect();
+        ui.painter()
+            .add(Shape::line(points, Stroke::new(3.0, color)));
+    }
+    response
+}
 
 pub fn clickable_active_icon(
     ui: &mut Ui,
