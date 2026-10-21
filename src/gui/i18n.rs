@@ -43,7 +43,7 @@ impl I18n {
         let file = match Localizations::get(&path) {
             Some(f) => f,
             None => {
-                eprintln!("Missing locale file: {}", path);
+                log::warn!("Missing locale file: {}", path);
                 return;
             }
         };
@@ -56,7 +56,7 @@ impl I18n {
         let resource = match FluentResource::try_new(source) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("Failed to parse Fluent resource for {}: {:?}", locale, e);
+                log::warn!("Failed to parse Fluent resource for {}: {:?}", locale, e);
                 return;
             }
         };
@@ -64,7 +64,7 @@ impl I18n {
         let langid: LanguageIdentifier = match locale.parse() {
             Ok(id) => id,
             Err(e) => {
-                eprintln!("Invalid language identifier '{}': {:?}", locale, e);
+                log::warn!("Invalid language identifier '{}': {:?}", locale, e);
                 return;
             }
         };
@@ -72,7 +72,7 @@ impl I18n {
         let mut bundle = FluentBundle::new(vec![langid]);
 
         if let Err(e) = bundle.add_resource(resource) {
-            eprintln!("Failed to add Fluent resource for {}: {:?}", locale, e);
+            log::warn!("Failed to add Fluent resource for {}: {:?}", locale, e);
             return;
         }
 

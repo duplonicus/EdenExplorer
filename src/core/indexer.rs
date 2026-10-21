@@ -547,7 +547,7 @@ pub fn load_theme_settings() -> Option<(ThemePalette, ThemePalette)> {
             Some((snapshot.light, snapshot.dark))
         }
         _ => {
-            eprintln!("Theme version mismatch or corruption. Resetting.");
+            log::warn!("Theme version mismatch or corruption. Resetting.");
             reset_theme_to_defaults();
             None
         }
@@ -575,9 +575,9 @@ fn reset_theme_to_defaults() {
     if let Some(path) = theme_cache_path() {
         // Remove the corrupted theme file
         if let Err(e) = std::fs::remove_file(&path) {
-            eprintln!("Failed to remove corrupted theme file: {}", e);
+            log::error!("Failed to remove corrupted theme file: {}", e);
         } else {
-            eprintln!("Corrupted theme file removed. Will use defaults on next startup.");
+            log::warn!("Corrupted theme file removed. Will use defaults on next startup.");
         }
 
         // Save fresh default themes
