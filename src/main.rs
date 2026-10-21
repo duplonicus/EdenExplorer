@@ -5,7 +5,7 @@ mod gui;
 use crate::core::indexer::{WindowSizeMode, load_windows_size_mode_on_start};
 use crate::core::launch::{LaunchError, acquire_or_forward, existing_directories, parse_args};
 use crate::core::utils::fonts::apply_custom_font_definitions;
-use crate::gui::windows::windowsoverrides::set_egui_ctx;
+use crate::gui::windows::windowsoverrides::{MIN_HEIGHT, MIN_WIDTH, set_egui_ctx};
 use eframe::{NativeOptions, egui};
 use std::os::windows::ffi::OsStrExt;
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
@@ -55,9 +55,10 @@ fn main() -> eframe::Result<()> {
 
     let window_size = match window_size_mode {
         WindowSizeMode::FullScreen => egui::Vec2::new(screen_w, screen_h),
-        WindowSizeMode::Custom { width, height } => {
-            egui::Vec2::new(width.min(screen_w), height.min(screen_h))
-        }
+        WindowSizeMode::Custom { width, height } => egui::Vec2::new(
+            width.max(MIN_WIDTH as f32).min(screen_w),
+            height.max(MIN_HEIGHT as f32).min(screen_h),
+        ),
     };
 
     let pos_x = ((screen_w - window_size.x) * 0.5).max(0.0);

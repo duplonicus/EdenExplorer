@@ -22,8 +22,8 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-const MIN_WIDTH: i32 = 600;
-const MIN_HEIGHT: i32 = 400;
+pub(crate) const MIN_WIDTH: i32 = 600;
+pub(crate) const MIN_HEIGHT: i32 = 400;
 /// Width of the client-area region reserved for native window resizing.
 const RESIZE_BORDER_FALLBACK: i32 = 8;
 
@@ -91,26 +91,36 @@ pub fn mark_clipboard_dirty() {
     CLIPBOARD_DIRTY.store(true, Ordering::Release);
 }
 
+/// The client size worth remembering for the next launch, if any.
+///
+/// Never persist while maximized: the screen-filling dimensions must not
+/// replace the user's restore size, and a stored "fullscreen" mode must survive
+/// a close-from-maximized. Never persist while minimized either: our
+/// WM_NCCALCSIZE keeps the client rect equal to the window rect, so a minimized
+/// window reports the ~160x28 caption Windows parks off-screen, and the next
+/// launch would open as a sliver of title bar.
+fn size_to_save(zoomed: bool, iconic: bool, width: f32, height: f32) -> Option<(f32, f32)> {
+    if zoomed || iconic || width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    Some((width, height))
+}
+
 fn save_manual_window_size(hwnd: HWND) {
     unsafe {
-        // Never persist while maximized: the screen-filling dimensions must
-        // not replace the user's restore size, and a stored "fullscreen" mode
-        // must survive a close-from-maximized.
-        if IsZoomed(hwnd).as_bool() {
-            return;
-        }
-
         let mut rect = RECT::default();
         if GetClientRect(hwnd, &mut rect).is_err() {
             return;
         }
 
-        let width = (rect.right - rect.left) as f32;
-        let height = (rect.bottom - rect.top) as f32;
-
-        if width <= 0.0 || height <= 0.0 {
+        let Some((width, height)) = size_to_save(
+            IsZoomed(hwnd).as_bool(),
+            IsIconic(hwnd).as_bool(),
+            (rect.right - rect.left) as f32,
+            (rect.bottom - rect.top) as f32,
+        ) else {
             return;
-        }
+        };
 
         let (
             folder_scanning_enabled,
@@ -690,9 +700,21 @@ pub fn set_window_mode(hwnd: HWND, mode: &WindowSizeMode) {
         },
 
         WindowSizeMode::Custom { width, height } => {
-            resize_and_center_window(hwnd, width.round() as i32, height.round() as i32);
+            let (width, height) = restored_size(*width, *height);
+            resize_and_center_window(hwnd, width, height);
         }
     }
+}
+
+/// A stored custom size, raised to the minimum window size so a tiny size saved
+/// by an older build heals on the next launch. Windows won't raise it for us:
+/// SetWindowPos only applies WM_GETMINMAXINFO's minimum through DefWindowProc's
+/// WM_WINDOWPOSCHANGING, and winit answers that message itself.
+fn restored_size(width: f32, height: f32) -> (i32, i32) {
+    (
+        (width.round() as i32).max(MIN_WIDTH),
+        (height.round() as i32).max(MIN_HEIGHT),
+    )
 }
 
 /// Resize the window while keeping its current top-left corner. Used for
@@ -720,5 +742,35 @@ pub fn set_window_size_keep_origin(hwnd: HWND, width: f32, height: f32) {
             height.round() as i32,
             SWP_NOZORDER | SWP_NOACTIVATE,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MIN_HEIGHT, MIN_WIDTH, restored_size, size_to_save};
+
+    #[test]
+    fn a_minimized_window_size_is_not_saved() {
+        // GetClientRect on a minimized Eden window: the parked caption.
+        assert_eq!(size_to_save(false, true, 160.0, 28.0), None);
+    }
+
+    #[test]
+    fn a_maximized_window_size_is_not_saved() {
+        assert_eq!(size_to_save(true, false, 2560.0, 1400.0), None);
+    }
+
+    #[test]
+    fn a_normal_window_size_is_saved() {
+        assert_eq!(
+            size_to_save(false, false, 1403.0, 988.0),
+            Some((1403.0, 988.0))
+        );
+    }
+
+    #[test]
+    fn a_tiny_stored_size_restores_at_the_minimum() {
+        assert_eq!(restored_size(160.0, 28.0), (MIN_WIDTH, MIN_HEIGHT));
+        assert_eq!(restored_size(1403.0, 988.0), (1403, 988));
     }
 }
