@@ -6,11 +6,12 @@ use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
 use windows::Win32::System::Console::{AllocConsole, GetConsoleWindow};
 
 const LOG_FILE_NAME: &str = "eden.log";
+const PREVIOUS_LOG_FILE_NAME: &str = "eden.prev.log";
 const DEFAULT_FILTER: &str = "warn,EdenExplorer=info";
 const DEBUG_FILTER: &str = "info,EdenExplorer=debug";
 
 /// Start logging to `%LOCALAPPDATA%\ExplorerEden\eden.log`, recreated on each
-/// launch. With `debug`, log more and open a console window to watch it live
+/// launch; the previous launch's log is kept as `eden.prev.log`. With `debug`, log more and open a console window to watch it live
 /// (debug builds already have one). `RUST_LOG` overrides the filter either way.
 pub fn init(debug: bool) {
     if debug && !has_console() {
@@ -56,6 +57,7 @@ fn open_log_file() -> Option<(File, PathBuf)> {
     let dir = dirs::data_local_dir()?.join("ExplorerEden");
     std::fs::create_dir_all(&dir).ok()?;
     remove_stale_window_logs(&dir);
+    keep_previous_log(&dir);
 
     let names = [
         LOG_FILE_NAME.to_owned(),
@@ -74,6 +76,13 @@ fn create_log_file(path: &Path) -> io::Result<File> {
         .truncate(true)
         .share_mode(FILE_SHARE_READ.0)
         .open(path)
+}
+
+/// Rename the last launch's `eden.log` to `eden.prev.log`, so relaunching after
+/// a crash doesn't wipe the log of the crash. Does nothing while another Eden
+/// window still holds `eden.log`, since it is open without delete sharing.
+fn keep_previous_log(dir: &Path) {
+    let _ = std::fs::rename(dir.join(LOG_FILE_NAME), dir.join(PREVIOUS_LOG_FILE_NAME));
 }
 
 /// Delete `eden-<pid>.log` files left by windows that have closed. Logs of
@@ -162,6 +171,41 @@ mod tests {
 
         drop(first);
         assert!(create_log_file(&path).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn relaunch_keeps_the_previous_log() {
+        let dir = std::env::temp_dir().join(format!("eden-prev-log-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(LOG_FILE_NAME);
+        let previous = dir.join(PREVIOUS_LOG_FILE_NAME);
+
+        std::fs::write(&previous, "two launches ago\n").unwrap();
+        create_log_file(&path)
+            .unwrap()
+            .write_all(b"crashed launch\n")
+            .unwrap();
+
+        keep_previous_log(&dir);
+        create_log_file(&path).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&previous).unwrap(),
+            "crashed launch\n"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+
+        // A second window must not move the log the first window is writing.
+        let mut running = create_log_file(&path).unwrap();
+        running.write_all(b"still running\n").unwrap();
+        keep_previous_log(&dir);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "still running\n");
+        assert_eq!(
+            std::fs::read_to_string(&previous).unwrap(),
+            "crashed launch\n"
+        );
+
+        drop(running);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
