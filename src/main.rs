@@ -97,7 +97,9 @@ fn main() -> eframe::Result<()> {
 /// queued frames (egui's defaults), what's on screen is several frames behind
 /// the mouse, which is easy to see when moving over the item list on a 60 Hz
 /// display. Prefer a DX12 adapter, present without vsync, and queue one frame.
-/// Eden repaints on demand, so this only costs anything while the UI changes.
+/// Eden repaints on demand, so this only costs anything while the UI changes;
+/// animations ask for their next frame at ANIMATION_FRAME_INTERVAL instead of
+/// right away, so they don't run uncapped.
 fn low_latency_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
     use eframe::egui_wgpu::{SurfaceConfig, WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew};
     use eframe::wgpu;
@@ -109,10 +111,7 @@ fn low_latency_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
             .filter(|adapter| surface.is_none_or(|surface| adapter.is_surface_supported(surface)))
             .max_by_key(|adapter| {
                 let info = adapter.get_info();
-                (
-                    info.backend == wgpu::Backend::Dx12,
-                    info.device_type == wgpu::DeviceType::DiscreteGpu,
-                )
+                adapter_rank(info.device_type, info.backend)
             })
             .cloned()
             .ok_or_else(|| "no graphics adapter can present to this window".to_owned())
@@ -126,6 +125,24 @@ fn low_latency_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
         wgpu_setup: WgpuSetup::CreateNew(setup),
         ..Default::default()
     }
+}
+
+/// Real hardware first (a discrete GPU, then integrated), then DX12 among
+/// adapters of the same kind. The software renderer (WARP, "Microsoft Basic
+/// Render Driver") is also a DX12 adapter, so it must never win on backend alone.
+fn adapter_rank(
+    device_type: eframe::wgpu::DeviceType,
+    backend: eframe::wgpu::Backend,
+) -> (u8, bool) {
+    use eframe::wgpu::{Backend, DeviceType};
+
+    let hardware = match device_type {
+        DeviceType::DiscreteGpu => 3,
+        DeviceType::IntegratedGpu => 2,
+        DeviceType::VirtualGpu | DeviceType::Other => 1,
+        DeviceType::Cpu => 0,
+    };
+    (hardware, backend == Backend::Dx12)
 }
 
 fn show_launch_error(error: &LaunchError) {
@@ -175,5 +192,50 @@ fn load_icon() -> egui::IconData {
             width: 64,
             height: 64,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::adapter_rank;
+    use eframe::wgpu::{Backend, DeviceType};
+
+    fn pick(adapters: &[(DeviceType, Backend)]) -> (DeviceType, Backend) {
+        *adapters
+            .iter()
+            .max_by_key(|(device_type, backend)| adapter_rank(*device_type, *backend))
+            .unwrap()
+    }
+
+    #[test]
+    fn integrated_gpu_beats_the_software_renderer() {
+        // DXGI lists WARP last, and max_by_key keeps the last of equal keys.
+        let adapters = [
+            (DeviceType::IntegratedGpu, Backend::Dx12),
+            (DeviceType::IntegratedGpu, Backend::Vulkan),
+            (DeviceType::Cpu, Backend::Dx12),
+        ];
+        assert_eq!(pick(&adapters), (DeviceType::IntegratedGpu, Backend::Dx12));
+    }
+
+    #[test]
+    fn integrated_gpu_without_dx12_still_beats_the_software_renderer() {
+        // wgpu skips some older iGPUs on DX12, leaving only GL for the real GPU.
+        let adapters = [
+            (DeviceType::Cpu, Backend::Dx12),
+            (DeviceType::IntegratedGpu, Backend::Gl),
+        ];
+        assert_eq!(pick(&adapters), (DeviceType::IntegratedGpu, Backend::Gl));
+    }
+
+    #[test]
+    fn discrete_gpu_on_dx12_is_preferred() {
+        let adapters = [
+            (DeviceType::DiscreteGpu, Backend::Dx12),
+            (DeviceType::DiscreteGpu, Backend::Vulkan),
+            (DeviceType::IntegratedGpu, Backend::Dx12),
+            (DeviceType::Cpu, Backend::Dx12),
+        ];
+        assert_eq!(pick(&adapters), (DeviceType::DiscreteGpu, Backend::Dx12));
     }
 }
