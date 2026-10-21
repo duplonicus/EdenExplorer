@@ -1190,14 +1190,14 @@ impl MainWindow {
                     self.mark_tab_infos_dirty();
                     self.load_path();
                 }
-                Err(e) => eprintln!("Failed to mount ISO: {}", e),
+                Err(e) => log::error!("Failed to mount ISO: {}", e),
             }
         }
     }
 
     pub fn eject_drive(&mut self, root: PathBuf) {
         if let Err(e) = iso::eject_drive(&root) {
-            eprintln!("Failed to eject: {}", e);
+            log::error!("Failed to eject: {}", e);
             return;
         }
         mark_drive_cache_dirty();

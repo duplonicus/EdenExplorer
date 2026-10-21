@@ -117,6 +117,10 @@ fn low_latency_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
                 )
             })
             .cloned()
+            .inspect(|adapter| {
+                let info = adapter.get_info();
+                log::info!("Rendering with {} on {:?}", info.name, info.backend);
+            })
             .ok_or_else(|| "no graphics adapter can present to this window".to_owned())
     }));
 
