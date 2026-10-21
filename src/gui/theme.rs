@@ -392,7 +392,9 @@ pub fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
             style.visuals.widgets.active.bg_fill = palette.primary_active;
 
             style.visuals.selection.bg_fill = palette.primary_hover;
-            style.visuals.selection.stroke.color = palette.primary_active;
+            // egui uses this for selected text and the focused text-field border,
+            // so it has to read on top of primary_hover.
+            style.visuals.selection.stroke.color = dark_selected_text_color(&palette);
 
             // 🔤 Text
             style.visuals.widgets.inactive.fg_stroke.color = Color32::from_rgb(220, 226, 232);
@@ -465,6 +467,12 @@ pub fn apply_checkbox_colors(ui: &mut egui::Ui, palette: &ThemePalette, checked:
     visuals.active.fg_stroke.color = palette.checkbox_checkmark_color;
 }
 
+// Light tint of the primary color: readable on the selection highlight in dark mode
+fn dark_selected_text_color(palette: &ThemePalette) -> Color32 {
+    let primary = palette.primary;
+    Color32::from_rgb(primary.r(), primary.g(), primary.b()).lerp_to_gamma(Color32::WHITE, 0.75)
+}
+
 // 🎯 Regenerate all base-derived colors when primary color changes
 pub fn regenerate_base_derived_colors(palette: &mut ThemePalette, is_dark: bool) {
     let base = palette.primary;
@@ -532,4 +540,46 @@ pub fn apply_font_to_context(ctx: &egui::Context, palette: &ThemePalette) {
 
     ctx.set_fonts(fonts);
     ctx.request_repaint();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn luminance(c: Color32) -> f32 {
+        let lin = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+    }
+
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let (la, lb) = (luminance(a), luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    #[test]
+    fn selected_text_is_readable_on_the_dark_selection_highlight() {
+        // Text fields draw on egui's dark extreme_bg_color, with the selection on top.
+        let field_bg = egui::Visuals::dark().extreme_bg_color;
+        let accents = [
+            base_color(),
+            Color32::from_rgb(40, 110, 220),
+            Color32::from_rgb(200, 50, 50),
+            Color32::from_rgb(40, 160, 90),
+        ];
+        for accent in accents {
+            let mut palette = get_default_palette(ThemeMode::Dark);
+            palette.primary = accent;
+            regenerate_base_derived_colors(&mut palette, true);
+            let highlight = field_bg.blend(palette.primary_hover);
+            let ratio = contrast(dark_selected_text_color(&palette), highlight);
+            assert!(ratio >= 4.5, "accent {accent:?}: contrast {ratio:.2}");
+        }
+    }
 }
