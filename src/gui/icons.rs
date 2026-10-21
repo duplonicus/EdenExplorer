@@ -143,24 +143,35 @@ impl IconCache {
         None
     }
 
-    /// Returns a custom Phosphor icon for folders with a recognized name.
+    /// Returns the Phosphor icon for a folder: its own icon for a recognized
+    /// name, otherwise the plain folder, so no folder gets Windows' shell icon.
     pub fn get_custom_folder_icon(&self, path: &Path, is_dir: bool) -> Option<&'static str> {
         if !is_dir {
             return None;
         }
-
-        if self.home_dir.as_deref() == Some(path) {
-            return Some(regular::HOUSE);
-        }
-
-        let name = path.file_name()?.to_str()?;
-
-        if is_linux_home(path) {
-            return Some(regular::HOUSE);
-        }
-
-        custom_folder_icon(name)
+        folder_glyph(path, self.home_dir.as_deref())
     }
+}
+
+/// `None` leaves drives, shares, This PC and phones on their shell icons.
+fn folder_glyph(path: &Path, home_dir: Option<&Path>) -> Option<&'static str> {
+    if home_dir == Some(path) || is_linux_home(path) {
+        return Some(regular::HOUSE);
+    }
+
+    // Drive and share roots have no file name.
+    let name = path.file_name()?;
+    if path.to_string_lossy().starts_with("::")
+        || portable::is_portable_device_path(&path.to_path_buf())
+    {
+        return None;
+    }
+
+    Some(
+        name.to_str()
+            .and_then(custom_folder_icon)
+            .unwrap_or(regular::FOLDER),
+    )
 }
 
 /// "/home/<user>" in WSL, reached as "W:\home\dup" or
@@ -489,6 +500,33 @@ mod tests {
         assert!(is_linux_home(Path::new(r"\\wsl.localhost\Ubuntu\home\dup")));
         assert!(!is_linux_home(Path::new(r"C:\site\pages\home\tests")));
         assert!(!is_linux_home(Path::new(r"W:\home")));
+    }
+
+    #[test]
+    fn unrecognized_folders_get_the_plain_folder_icon() {
+        let home = Path::new(r"C:\Users\dup");
+        assert_eq!(
+            folder_glyph(Path::new(r"C:\Users\dup\dev.win\EdenExplorer"), Some(home)),
+            Some(regular::FOLDER)
+        );
+        assert_eq!(folder_glyph(home, Some(home)), Some(regular::HOUSE));
+        assert_eq!(
+            folder_glyph(Path::new(r"C:\Users\dup\Downloads"), Some(home)),
+            Some(regular::DOWNLOAD_SIMPLE)
+        );
+    }
+
+    #[test]
+    fn drives_shares_and_virtual_folders_keep_their_shell_icons() {
+        for path in [
+            r"C:\",
+            r"\\server\share",
+            "::MY_PC::",
+            "::RECYCLE_BIN::",
+            &portable::make_portable_path("phone", "DEVICE").to_string_lossy(),
+        ] {
+            assert_eq!(folder_glyph(Path::new(path), None), None, "{path}");
+        }
     }
 
     #[test]
