@@ -8,8 +8,8 @@ use eframe::egui;
 use egui::Context;
 use egui_phosphor::regular;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::{Mutex, RwLock};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::*;
@@ -69,6 +69,17 @@ lazy_static::lazy_static! {
 
 static CLIPBOARD_DIRTY: AtomicBool = AtomicBool::new(true);
 
+/// The window size `save_manual_window_size` last wrote to disk, waiting for the
+/// app to adopt it (see `take_saved_window_size`).
+static SAVED_WINDOW_SIZE: Mutex<Option<WindowSizeMode>> = Mutex::new(None);
+
+/// The window size last saved by a resize or close, if the app hasn't taken it
+/// yet. The app's own settings saves write its in-memory size, so it must adopt
+/// this one first or it writes the launch-time size back over it.
+pub fn take_saved_window_size() -> Option<WindowSizeMode> {
+    SAVED_WINDOW_SIZE.lock().ok()?.take()
+}
+
 pub fn set_egui_ctx(ctx: &Context) {
     if let Ok(mut guard) = EGUI_CTX.write() {
         *guard = Some(ctx.clone());
@@ -91,19 +102,37 @@ pub fn mark_clipboard_dirty() {
     CLIPBOARD_DIRTY.store(true, Ordering::Release);
 }
 
-/// The client size worth remembering for the next launch, if any.
+/// How the window is shown when its size is saved.
+#[derive(Clone, Copy)]
+enum ShownAs {
+    Normal,
+    Maximized,
+    /// `restores_maximized`: it was maximized before it was minimized.
+    Minimized {
+        restores_maximized: bool,
+    },
+}
+
+/// The size worth remembering for the next launch, if any.
 ///
 /// Never persist while maximized: the screen-filling dimensions must not
 /// replace the user's restore size, and a stored "fullscreen" mode must survive
-/// a close-from-maximized. Never persist while minimized either: our
-/// WM_NCCALCSIZE keeps the client rect equal to the window rect, so a minimized
-/// window reports the ~160x28 caption Windows parks off-screen, and the next
-/// launch would open as a sliver of title bar.
-fn size_to_save(zoomed: bool, iconic: bool, width: f32, height: f32) -> Option<(f32, f32)> {
-    if zoomed || iconic || width <= 0.0 || height <= 0.0 {
-        return None;
-    }
-    Some((width, height))
+/// a close-from-maximized. While minimized (the taskbar, or Show Desktop) the
+/// client rect is useless: our WM_NCCALCSIZE keeps it equal to the window rect,
+/// which is the ~160x28 caption Windows parks off-screen. Use the size the
+/// window will restore to instead (`normal`, from GetWindowPlacement).
+fn size_to_save(shown: ShownAs, client: (f32, f32), normal: (f32, f32)) -> Option<(f32, f32)> {
+    let (width, height) = match shown {
+        ShownAs::Normal => client,
+        ShownAs::Maximized
+        | ShownAs::Minimized {
+            restores_maximized: true,
+        } => return None,
+        ShownAs::Minimized {
+            restores_maximized: false,
+        } => normal,
+    };
+    (width > 0.0 && height > 0.0).then_some((width, height))
 }
 
 fn save_manual_window_size(hwnd: HWND) {
@@ -112,12 +141,34 @@ fn save_manual_window_size(hwnd: HWND) {
         if GetClientRect(hwnd, &mut rect).is_err() {
             return;
         }
+        let mut placement = WINDOWPLACEMENT {
+            length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+            ..Default::default()
+        };
+        if GetWindowPlacement(hwnd, &mut placement).is_err() {
+            return;
+        }
 
+        let shown = if IsIconic(hwnd).as_bool() {
+            ShownAs::Minimized {
+                restores_maximized: placement.flags.0 & WPF_RESTORETOMAXIMIZED.0 != 0,
+            }
+        } else if IsZoomed(hwnd).as_bool() {
+            ShownAs::Maximized
+        } else {
+            ShownAs::Normal
+        };
+        let normal = placement.rcNormalPosition;
         let Some((width, height)) = size_to_save(
-            IsZoomed(hwnd).as_bool(),
-            IsIconic(hwnd).as_bool(),
-            (rect.right - rect.left) as f32,
-            (rect.bottom - rect.top) as f32,
+            shown,
+            (
+                (rect.right - rect.left) as f32,
+                (rect.bottom - rect.top) as f32,
+            ),
+            (
+                (normal.right - normal.left) as f32,
+                (normal.bottom - normal.top) as f32,
+            ),
         ) else {
             return;
         };
@@ -168,6 +219,10 @@ fn save_manual_window_size(hwnd: HWND) {
             &recycle_bin_column_sizes,
             &directory_settings,
         );
+
+        if let Ok(mut saved) = SAVED_WINDOW_SIZE.lock() {
+            *saved = Some(window_size_mode);
+        }
     }
 }
 
@@ -747,23 +802,41 @@ pub fn set_window_size_keep_origin(hwnd: HWND, width: f32, height: f32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{MIN_HEIGHT, MIN_WIDTH, restored_size, size_to_save};
+    use super::{MIN_HEIGHT, MIN_WIDTH, ShownAs, restored_size, size_to_save};
+
+    // GetClientRect of a minimized Eden window: the caption parked off-screen.
+    const PARKED: (f32, f32) = (160.0, 28.0);
 
     #[test]
-    fn a_minimized_window_size_is_not_saved() {
-        // GetClientRect on a minimized Eden window: the parked caption.
-        assert_eq!(size_to_save(false, true, 160.0, 28.0), None);
+    fn a_minimized_window_saves_its_restore_size() {
+        let shown = ShownAs::Minimized {
+            restores_maximized: false,
+        };
+        assert_eq!(
+            size_to_save(shown, PARKED, (1045.0, 662.0)),
+            Some((1045.0, 662.0))
+        );
+    }
+
+    #[test]
+    fn a_window_minimized_from_maximized_saves_nothing() {
+        let shown = ShownAs::Minimized {
+            restores_maximized: true,
+        };
+        assert_eq!(size_to_save(shown, PARKED, (1045.0, 662.0)), None);
     }
 
     #[test]
     fn a_maximized_window_size_is_not_saved() {
-        assert_eq!(size_to_save(true, false, 2560.0, 1400.0), None);
+        let shown = ShownAs::Maximized;
+        assert_eq!(size_to_save(shown, (2560.0, 1400.0), (1045.0, 662.0)), None);
     }
 
     #[test]
-    fn a_normal_window_size_is_saved() {
+    fn a_normal_window_saves_its_client_size() {
+        let shown = ShownAs::Normal;
         assert_eq!(
-            size_to_save(false, false, 1403.0, 988.0),
+            size_to_save(shown, (1403.0, 988.0), (1403.0, 988.0)),
             Some((1403.0, 988.0))
         );
     }
