@@ -394,7 +394,17 @@ impl MainWindow {
         self.save_app_settings_to_disk();
     }
 
-    fn save_app_settings_to_disk(&self) {
+    /// Take the window size the wndproc saved after a resize or close, so the
+    /// settings window shows it and our own saves don't write the launch-time
+    /// size back over it.
+    pub(crate) fn adopt_saved_window_size(&mut self) {
+        if let Some(mode) = crate::gui::windows::windowsoverrides::take_saved_window_size() {
+            self.settings_window.current_settings.window_size_mode = mode;
+        }
+    }
+
+    fn save_app_settings_to_disk(&mut self) {
+        self.adopt_saved_window_size();
         save_app_settings(
             self.settings_window
                 .current_settings

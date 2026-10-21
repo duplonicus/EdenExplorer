@@ -341,6 +341,7 @@ impl eframe::App for MainWindow {
                 self.load_path();
             }
         }
+        self.adopt_saved_window_size();
         let palette = get_palette(self.theme);
 
         if self.hwnd.is_none() {
