@@ -297,7 +297,7 @@ pub fn handle_context_menu_actions(
                     )
                     .map(Some)
                     .unwrap_or_else(|err| {
-                        eprintln!("Windows menu load failed: {}", err);
+                        log::error!("Windows menu load failed: {}", err);
                         None
                     });
         } else {
@@ -315,7 +315,7 @@ pub fn handle_context_menu_actions(
             (hwnd, explorer_state.windows_context_menu_cache.as_ref())
         {
             if let Err(err) = cache.menu.show_native(hwnd) {
-                eprintln!("Windows native menu failed: {}", err);
+                log::error!("Windows native menu failed: {}", err);
             }
         }
         ui.close();
@@ -333,7 +333,7 @@ pub fn handle_context_menu_actions(
             {
                 if let Some(hwnd) = hwnd {
                     if let Err(err) = cache.menu.invoke(hwnd, item.id) {
-                        eprintln!("Windows menu invoke failed: {}", err);
+                        log::error!("Windows menu invoke failed: {}", err);
                     }
                 }
                 ui.close();
@@ -896,7 +896,7 @@ pub fn handle_global_actions(
     }
 
     if drag_state.active && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-        println!("852 - clearing drag_state");
+        log::debug!("Clearing drag_state");
         drag_state.active = false;
         drag_state.source_items.clear();
         drag_state.start_pos = None;

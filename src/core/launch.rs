@@ -64,6 +64,7 @@ pub struct InstanceGuard {
 pub struct LaunchOptions {
     pub paths: Vec<PathBuf>,
     pub new_window: bool,
+    pub debug: bool,
 }
 
 #[derive(Debug)]
@@ -113,7 +114,7 @@ struct LaunchI18n {
 impl LaunchI18n {
     fn new() -> Self {
         let locale = system_locale();
-        println!("Windows locale: {}", locale);
+        log::debug!("Windows locale: {}", locale);
 
         let langid = LanguageIdentifier::from_str(&locale)
             .unwrap_or_else(|_| LanguageIdentifier::from_str("en-US").unwrap());
@@ -193,6 +194,8 @@ where
             after_double_dash = true;
         } else if !after_double_dash && arg == "--new-window" {
             options.new_window = true;
+        } else if !after_double_dash && arg == "--debug" {
+            options.debug = true;
         } else if !after_double_dash && arg.starts_with('-') {
             return Err(LaunchError::UnknownOption(arg));
         } else if !arg.is_empty() {
@@ -274,7 +277,7 @@ fn load_locale(bundle: &mut FluentBundle<FluentResource>, locale: &str) {
     let file = match LaunchLocalizations::get(&path) {
         Some(file) => file,
         None => {
-            println!("Missing locale file: {}", path);
+            log::warn!("Missing locale file: {}", path);
             return;
         }
     };
@@ -283,14 +286,14 @@ fn load_locale(bundle: &mut FluentBundle<FluentResource>, locale: &str) {
         Cow::Borrowed(bytes) => match std::str::from_utf8(bytes) {
             Ok(text) => text.to_owned(),
             Err(e) => {
-                println!("UTF-8 error: {:?}", e);
+                log::warn!("UTF-8 error in {}: {:?}", path, e);
                 return;
             }
         },
         Cow::Owned(bytes) => match String::from_utf8(bytes) {
             Ok(text) => text,
             Err(e) => {
-                println!("UTF-8 error: {:?}", e);
+                log::warn!("UTF-8 error in {}: {:?}", path, e);
                 return;
             }
         },
@@ -299,13 +302,13 @@ fn load_locale(bundle: &mut FluentBundle<FluentResource>, locale: &str) {
     let resource = match FluentResource::try_new(source) {
         Ok(resource) => resource,
         Err((_, errors)) => {
-            println!("Fluent parse errors: {:?}", errors);
+            log::warn!("Fluent parse errors in {}: {:?}", path, errors);
             return;
         }
     };
 
     if let Err(errors) = bundle.add_resource(resource) {
-        println!("add_resource errors: {:?}", errors);
+        log::warn!("add_resource errors in {}: {:?}", path, errors);
     }
 }
 
@@ -407,10 +410,22 @@ mod tests {
         .unwrap();
 
         assert!(options.new_window);
+        assert!(!options.debug);
         assert_eq!(
             options.paths,
             vec![PathBuf::from("C:\\Projects"), PathBuf::from("D:\\Archive")]
         );
+    }
+
+    #[test]
+    fn parses_debug_flag() {
+        let options = parse_args(["EdenExplorer.exe", "--debug", "C:\\Projects"]).unwrap();
+        assert!(options.debug);
+        assert_eq!(options.paths, vec![PathBuf::from("C:\\Projects")]);
+
+        let options = parse_args(["EdenExplorer.exe", "--", "--debug"]).unwrap();
+        assert!(!options.debug);
+        assert_eq!(options.paths, vec![PathBuf::from("--debug")]);
     }
 
     #[test]

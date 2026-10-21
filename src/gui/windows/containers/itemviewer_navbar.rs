@@ -165,7 +165,7 @@ pub fn draw_itemviewer_navigation_bar(
                     action.nav_to = Some(new_path);
                     exit_edit_mode = true;
                 } else {
-                    println!(
+                    log::info!(
                         "{}: {} ({}: {})",
                         i18n.tr("tooltip_invalid_path"),
                         tab.breadcrumb_path_buffer,
@@ -559,7 +559,7 @@ pub(crate) fn open_default_terminal(current_dir: &Path) {
             .is_ok();
 
     if !launched {
-        eprintln!("Failed to open terminal");
+        log::error!("Failed to open terminal");
     }
 }
 

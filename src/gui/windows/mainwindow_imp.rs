@@ -522,9 +522,9 @@ impl MainWindow {
                 let state = self.file_op.take().expect("file_op present");
                 if let Some(e) = error {
                     if cancelled {
-                        eprintln!("File operation cancelled: {}", e);
+                        log::info!("File operation cancelled: {}", e);
                     } else {
-                        eprintln!("File operation failed: {}", e);
+                        log::error!("File operation failed: {}", e);
                     }
                 }
                 self.run_file_op_completion(state.completion);
@@ -603,6 +603,8 @@ impl MainWindow {
             let view = self.active_tab().view(side);
             (view.nav.current.clone(), view.nav.is_root())
         };
+
+        log::debug!("Loading {:?} view: {}", side, current_path.display());
 
         let current_settings = self.settings_window.current_settings.clone();
 
@@ -709,7 +711,7 @@ impl MainWindow {
             let recycle_pidl = match SHGetKnownFolderIDList(&FOLDERID_RecycleBinFolder, 0, None) {
                 Ok(pidl) => pidl,
                 Err(err) => {
-                    eprintln!("Failed to resolve Recycle Bin: {:?}", err);
+                    log::error!("Failed to resolve Recycle Bin: {:?}", err);
                     return;
                 }
             };
@@ -717,7 +719,7 @@ impl MainWindow {
             let recycle_item: IShellItem = match SHCreateItemFromIDList(recycle_pidl) {
                 Ok(item) => item,
                 Err(err) => {
-                    eprintln!("Failed to open Recycle Bin shell item: {:?}", err);
+                    log::error!("Failed to open Recycle Bin shell item: {:?}", err);
                     CoTaskMemFree(Some(recycle_pidl as _));
                     return;
                 }
@@ -727,7 +729,7 @@ impl MainWindow {
                 match recycle_item.BindToHandler(None, &BHID_EnumItems) {
                     Ok(items) => items,
                     Err(err) => {
-                        eprintln!("Failed to enumerate Recycle Bin items: {:?}", err);
+                        log::error!("Failed to enumerate Recycle Bin items: {:?}", err);
                         CoTaskMemFree(Some(recycle_pidl as _));
                         return;
                     }
@@ -736,7 +738,7 @@ impl MainWindow {
             loop {
                 let mut fetched_items: [Option<IShellItem>; 1] = [None];
                 if let Err(err) = enum_items.Next(&mut fetched_items, None) {
-                    eprintln!("Failed to read Recycle Bin item: {:?}", err);
+                    log::warn!("Failed to read Recycle Bin item: {:?}", err);
                     break;
                 }
 
@@ -761,7 +763,7 @@ impl MainWindow {
                         Some(pidl_bytes)
                     }
                     Err(err) => {
-                        eprintln!("Failed to capture Recycle Bin PIDL: {:?}", err);
+                        log::warn!("Failed to capture Recycle Bin PIDL: {:?}", err);
                         None
                     }
                 };
@@ -1044,7 +1046,7 @@ impl MainWindow {
                 };
 
                 if let Err(e) = restore_paths_native(recycle_bin_pidls) {
-                    eprintln!("Recycle bin restore failed: {:?}", e);
+                    log::error!("Recycle bin restore failed: {:?}", e);
                 }
 
                 self.load_path();
@@ -1261,7 +1263,7 @@ impl MainWindow {
     }
 
     fn cleanup_resources(&mut self) {
-        println!("Cleaning up resources...");
+        log::info!("Cleaning up resources...");
 
         if self.column_settings_save_due.take().is_some() {
             self.save_app_settings_to_disk();
@@ -2678,7 +2680,7 @@ pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer
                         );
 
                         if result.0 <= std::ptr::null_mut() {
-                            eprintln!("Failed to open file: {}", path.display());
+                            log::error!("Failed to open file: {}", path.display());
                         }
                     }
                 }
@@ -2746,7 +2748,7 @@ pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer
                 let current_path = explorer.current_nav().current.clone();
 
                 if let Err(e) = show_copy_move_dialog(valid_files, &current_path) {
-                    eprintln!("Failed to show copy/move dialog: {}", e);
+                    log::error!("Failed to show copy/move dialog: {}", e);
                 }
 
                 // ✅ Defer refresh (important)
@@ -2804,9 +2806,9 @@ pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer
                 };
 
                 if existing_sources.is_empty() {
-                    eprintln!("Skipping move: all dragged sources have already disappeared");
+                    log::warn!("Skipping move: all dragged sources have already disappeared");
                 } else if let Err(error) = move_result {
-                    eprintln!("Failed to move dragged items: {error}");
+                    log::error!("Failed to move dragged items: {error}");
                 } else if explorer.move_tagged_paths_to_dir(&existing_sources, &target_dir) {
                     explorer.persist_tags();
                 }

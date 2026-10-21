@@ -43,6 +43,8 @@ fn main() -> eframe::Result<()> {
         }
     };
 
+    core::logging::init(launch_options.debug || cfg!(debug_assertions));
+
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }

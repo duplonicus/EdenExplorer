@@ -341,7 +341,7 @@ impl eframe::App for MainWindow {
 
                 unsafe {
                     if let Err(e) = install_wndproc(hwnd) {
-                        eprintln!("Failed to install wndproc: {}", e);
+                        log::error!("Failed to install wndproc: {}", e);
                     }
                 }
 
@@ -349,7 +349,7 @@ impl eframe::App for MainWindow {
                     crate::gui::windows::dragdrop::WindowsDragDropBackend::new(Some(hwnd)),
                 ));
             } else {
-                eprintln!("Failed to get HWND on first frame");
+                log::error!("Failed to get HWND on first frame");
             }
         }
 
