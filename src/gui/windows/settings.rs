@@ -767,7 +767,7 @@ fn draw_general_tab(
                     window_size_changed |= ui
                         .add_sized(
                             [SETTINGS_VALUE_WIDTH, ui.spacing().interact_size.y],
-                            egui::DragValue::new(width).range(800.0..=4000.0).speed(1.0),
+                            window_size_field(width, 800.0..=4000.0),
                         )
                         .changed();
                 },
@@ -783,9 +783,7 @@ fn draw_general_tab(
                     window_size_changed |= ui
                         .add_sized(
                             [SETTINGS_VALUE_WIDTH, ui.spacing().interact_size.y],
-                            egui::DragValue::new(height)
-                                .range(600.0..=3000.0)
-                                .speed(1.0),
+                            window_size_field(height, 600.0..=3000.0),
                         )
                         .changed();
                 },
@@ -1008,6 +1006,18 @@ pub fn combo_box_string(
     changed
 }
 
+/// A width or height field for the custom window size. The window itself can
+/// be resized below the field's range (down to `MIN_WIDTH` x `MIN_HEIGHT`) and
+/// that size is copied into the settings, so the field must not clamp a value
+/// it is only showing: egui counts the clamp as a change, which would apply
+/// the settings and resize the window just by opening this tab.
+fn window_size_field(value: &mut f32, range: std::ops::RangeInclusive<f32>) -> egui::DragValue<'_> {
+    egui::DragValue::new(value)
+        .range(range)
+        .clamp_existing_to_range(false)
+        .speed(1.0)
+}
+
 pub fn draw_settings_window(
     ctx: &egui::Context,
     settings: &mut SettingsWindow,
@@ -1219,4 +1229,26 @@ pub fn draw_settings_window(
         settings.open = false;
     }
     action
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn showing_a_window_size_below_the_field_range_changes_nothing() {
+        let ctx = egui::Context::default();
+        let (mut width, mut height) = (700.0_f32, 450.0_f32);
+        let mut changed = false;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            changed |= ui
+                .add(window_size_field(&mut width, 800.0..=4000.0))
+                .changed();
+            changed |= ui
+                .add(window_size_field(&mut height, 600.0..=3000.0))
+                .changed();
+        });
+        assert_eq!((width, height), (700.0, 450.0));
+        assert!(!changed);
+    }
 }
