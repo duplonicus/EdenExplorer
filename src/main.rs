@@ -93,10 +93,11 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-/// Keep the hover highlight on the cursor. With Vulkan, or with vsync and two
-/// queued frames (egui's defaults), what's on screen is several frames behind
-/// the mouse, which is easy to see when moving over the item list on a 60 Hz
-/// display. Prefer a DX12 adapter, present without vsync, and queue one frame.
+/// Keep the hover highlight on the cursor. With Vulkan, or with vsync (eframe's
+/// default), what's on screen trails the mouse, which is easy to see when
+/// moving over the item list on a 60 Hz display. Prefer a DX12 adapter and
+/// present without vsync. eframe already queues at most one frame
+/// (`SurfaceConfig::LOW_LATENCY`); this keeps that.
 /// Eden repaints on demand, so this only costs anything while the UI changes;
 /// animations ask for their next frame at ANIMATION_FRAME_INTERVAL instead of
 /// right away, so they don't run uncapped.
