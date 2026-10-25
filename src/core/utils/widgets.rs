@@ -459,4 +459,40 @@ mod tests {
             "requested delays: {delays:?}"
         );
     }
+
+    /// egui's Spinner asks for a repaint every frame, which runs uncapped now
+    /// that vsync is off; every spinner must be `loading_spinner`.
+    #[test]
+    fn no_egui_spinner_is_used() {
+        fn rust_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    rust_files(&path, files);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    files.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        rust_files(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        assert!(files.len() > 10, "found only {} source files", files.len());
+        // Split so this test doesn't match itself.
+        let patterns = [concat!(".spin", "ner()"), concat!("Spin", "ner::new(")];
+        let offenders: Vec<String> = files
+            .iter()
+            .flat_map(|path| {
+                let text = std::fs::read_to_string(path).unwrap();
+                text.lines()
+                    .enumerate()
+                    .filter(|(_, line)| patterns.iter().any(|p| line.contains(p)))
+                    .map(|(n, line)| format!("{}:{}: {}", path.display(), n + 1, line.trim()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(offenders, Vec::<String>::new());
+    }
 }

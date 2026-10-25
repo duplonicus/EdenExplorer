@@ -6,7 +6,7 @@ use crate::core::indexer::{
     save_favorites, save_tags, save_theme_settings,
 };
 use crate::core::iso;
-use crate::core::utils::widgets::request_animation_frame;
+use crate::core::utils::widgets::{loading_spinner, request_animation_frame};
 use crate::gui::MainWindow;
 use crate::gui::i18n::I18n;
 use crate::gui::theme::{
@@ -2999,7 +2999,8 @@ pub fn draw_file_op_window(
                 });
             } else {
                 ui.horizontal(|ui| {
-                    ui.spinner();
+                    let size = ui.spacing().interact_size.y;
+                    loading_spinner(ui, size);
                     ui.label(i18n.tr("delete_progress_working"));
                 });
             }
