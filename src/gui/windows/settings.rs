@@ -764,12 +764,7 @@ fn draw_general_tab(
                 },
                 |ui| {
                     apply_eden_visual_overrides(ui, palette);
-                    window_size_changed |= ui
-                        .add_sized(
-                            [SETTINGS_VALUE_WIDTH, ui.spacing().interact_size.y],
-                            window_size_field(width, 800.0..=4000.0),
-                        )
-                        .changed();
+                    window_size_changed |= window_size_field(ui, width, 800.0..=4000.0).changed();
                 },
             );
 
@@ -780,12 +775,7 @@ fn draw_general_tab(
                 },
                 |ui| {
                     apply_eden_visual_overrides(ui, palette);
-                    window_size_changed |= ui
-                        .add_sized(
-                            [SETTINGS_VALUE_WIDTH, ui.spacing().interact_size.y],
-                            window_size_field(height, 600.0..=3000.0),
-                        )
-                        .changed();
+                    window_size_changed |= window_size_field(ui, height, 600.0..=3000.0).changed();
                 },
             );
         }
@@ -1007,15 +997,30 @@ pub fn combo_box_string(
 }
 
 /// A width or height field for the custom window size. The window itself can
-/// be resized below the field's range (down to `MIN_WIDTH` x `MIN_HEIGHT`) and
-/// that size is copied into the settings, so the field must not clamp a value
-/// it is only showing: egui counts the clamp as a change, which would apply
-/// the settings and resize the window just by opening this tab.
-fn window_size_field(value: &mut f32, range: std::ops::RangeInclusive<f32>) -> egui::DragValue<'_> {
-    egui::DragValue::new(value)
-        .range(range)
-        .clamp_existing_to_range(false)
-        .speed(1.0)
+/// be resized below `range` (down to `MIN_WIDTH` x `MIN_HEIGHT`) and that size
+/// is copied into the settings, so the field must not clamp a value it is only
+/// showing: a clamp counts as a change, which applies the settings and resizes
+/// the window. egui's own range clamps whenever the field loses keyboard focus,
+/// even when nothing was typed, so the range is applied here instead, and only
+/// to a value the user actually changed.
+fn window_size_field(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+) -> egui::Response {
+    let old_value = *value;
+    let mut response = ui.add_sized(
+        [SETTINGS_VALUE_WIDTH, ui.spacing().interact_size.y],
+        egui::DragValue::new(value).speed(1.0),
+    );
+    if response.changed() {
+        *value = value.clamp(*range.start(), *range.end());
+        // Stepping past an end of the range clamps straight back.
+        if *value == old_value {
+            response.flags.set(egui::response::Flags::CHANGED, false);
+        }
+    }
+    response
 }
 
 pub fn draw_settings_window(
@@ -1235,20 +1240,97 @@ pub fn draw_settings_window(
 mod tests {
     use super::*;
 
+    /// Runs one frame with a width field (range 800..=4000) and returns its
+    /// response. `focus` is applied to the field before the frame.
+    fn width_frame(
+        ctx: &egui::Context,
+        width: &mut f32,
+        events: Vec<egui::Event>,
+        focus: Option<(egui::Id, bool)>,
+    ) -> egui::Response {
+        if let Some((id, focused)) = focus {
+            ctx.memory_mut(|mem| {
+                if focused {
+                    mem.request_focus(id)
+                } else {
+                    mem.surrender_focus(id)
+                }
+            });
+        }
+        let input = egui::RawInput {
+            events,
+            ..Default::default()
+        };
+        let mut response = None;
+        let _ = ctx.run_ui(input, |ui| {
+            response = Some(window_size_field(ui, width, 800.0..=4000.0));
+        });
+        response.unwrap()
+    }
+
     #[test]
     fn showing_a_window_size_below_the_field_range_changes_nothing() {
         let ctx = egui::Context::default();
-        let (mut width, mut height) = (700.0_f32, 450.0_f32);
+        let mut width = 700.0_f32;
+        let response = width_frame(&ctx, &mut width, vec![], None);
+        assert_eq!(width, 700.0);
+        assert!(!response.changed());
+    }
+
+    #[test]
+    fn clicking_into_a_size_field_and_out_again_changes_nothing() {
+        let ctx = egui::Context::default();
+        let mut width = 700.0_f32;
+        let id = width_frame(&ctx, &mut width, vec![], None).id;
         let mut changed = false;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            changed |= ui
-                .add(window_size_field(&mut width, 800.0..=4000.0))
-                .changed();
-            changed |= ui
-                .add(window_size_field(&mut height, 600.0..=3000.0))
-                .changed();
-        });
-        assert_eq!((width, height), (700.0, 450.0));
+        changed |= width_frame(&ctx, &mut width, vec![], Some((id, true))).changed();
+        changed |= width_frame(&ctx, &mut width, vec![], None).changed();
+        changed |= width_frame(&ctx, &mut width, vec![], Some((id, false))).changed();
+        changed |= width_frame(&ctx, &mut width, vec![], None).changed();
+        assert_eq!(width, 700.0);
         assert!(!changed);
+    }
+
+    #[test]
+    fn stepping_past_the_maximum_size_changes_nothing() {
+        let ctx = egui::Context::default();
+        let mut width = 4000.0_f32;
+        let id = width_frame(&ctx, &mut width, vec![], None).id;
+        let up = egui::Event::Key {
+            key: egui::Key::ArrowUp,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut changed = false;
+        changed |= width_frame(&ctx, &mut width, vec![], Some((id, true))).changed();
+        changed |= width_frame(&ctx, &mut width, vec![up], None).changed();
+        assert_eq!(width, 4000.0);
+        assert!(!changed);
+    }
+
+    #[test]
+    fn a_typed_size_below_the_range_is_raised_to_its_minimum() {
+        let ctx = egui::Context::default();
+        let mut width = 1000.0_f32;
+        let id = width_frame(&ctx, &mut width, vec![], None).id;
+        let mut changed = false;
+        changed |= width_frame(&ctx, &mut width, vec![], Some((id, true))).changed();
+        // Replace "1000" with "5".
+        let backspace = egui::Event::Key {
+            key: egui::Key::Backspace,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut typed = vec![backspace; 4];
+        typed.push(egui::Event::Text("5".into()));
+        changed |= width_frame(&ctx, &mut width, typed, None).changed();
+        changed |= width_frame(&ctx, &mut width, vec![], Some((id, false))).changed();
+        changed |= width_frame(&ctx, &mut width, vec![], None).changed();
+        assert_eq!(width, 800.0);
+        assert!(changed);
     }
 }
