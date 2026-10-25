@@ -25,6 +25,8 @@ pub fn request_animation_frame(ctx: &Context) {
 /// capped at ANIMATION_FRAME_INTERVAL.
 pub fn loading_spinner(ui: &mut Ui, size: f32) -> Response {
     let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+    // Screen readers announce it as busy, like egui's.
+    response.widget_info(|| WidgetInfo::new(WidgetType::ProgressIndicator));
     if ui.is_rect_visible(rect) {
         request_animation_frame(ui.ctx());
 
@@ -460,8 +462,9 @@ mod tests {
         );
     }
 
-    /// egui's Spinner asks for a repaint every frame, which runs uncapped now
-    /// that vsync is off; every spinner must be `loading_spinner`.
+    /// egui's Spinner, and a ProgressBar with `animate(true)`, ask for a repaint
+    /// every frame, which runs uncapped now that vsync is off; every spinner
+    /// must be `loading_spinner`.
     #[test]
     fn no_egui_spinner_is_used() {
         fn rust_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
@@ -481,7 +484,11 @@ mod tests {
         );
         assert!(files.len() > 10, "found only {} source files", files.len());
         // Split so this test doesn't match itself.
-        let patterns = [concat!(".spin", "ner()"), concat!("Spin", "ner::new(")];
+        let patterns = [
+            concat!(".spin", "ner()"),
+            concat!("Spin", "ner::"),
+            concat!(".anim", "ate(true)"),
+        ];
         let offenders: Vec<String> = files
             .iter()
             .flat_map(|path| {
@@ -494,5 +501,24 @@ mod tests {
             })
             .collect();
         assert_eq!(offenders, Vec::<String>::new());
+    }
+
+    #[test]
+    fn spinner_is_announced_as_a_progress_indicator() {
+        let ctx = Context::default();
+        ctx.enable_accesskit();
+        let output = ctx.run_ui(RawInput::default(), |ui| {
+            loading_spinner(ui, 28.0);
+        });
+        let update = output
+            .platform_output
+            .accesskit_update
+            .expect("no accesskit tree");
+        let roles: Vec<accesskit::Role> =
+            update.nodes.iter().map(|(_, node)| node.role()).collect();
+        assert!(
+            roles.contains(&accesskit::Role::ProgressIndicator),
+            "roles: {roles:?}"
+        );
     }
 }
