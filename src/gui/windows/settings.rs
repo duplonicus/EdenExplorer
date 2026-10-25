@@ -764,7 +764,8 @@ fn draw_general_tab(
                 },
                 |ui| {
                     apply_eden_visual_overrides(ui, palette);
-                    window_size_changed |= window_size_field(ui, width, 800.0..=4000.0).changed();
+                    window_size_changed |=
+                        window_size_field(ui, "window_width", width, 800.0..=4000.0).changed();
                 },
             );
 
@@ -775,7 +776,8 @@ fn draw_general_tab(
                 },
                 |ui| {
                     apply_eden_visual_overrides(ui, palette);
-                    window_size_changed |= window_size_field(ui, height, 600.0..=3000.0).changed();
+                    window_size_changed |=
+                        window_size_field(ui, "window_height", height, 600.0..=3000.0).changed();
                 },
             );
         }
@@ -996,30 +998,89 @@ pub fn combo_box_string(
     changed
 }
 
-/// A width or height field for the custom window size. The window itself can
-/// be resized below `range` (down to `MIN_WIDTH` x `MIN_HEIGHT`) and that size
-/// is copied into the settings, so the field must not clamp a value it is only
-/// showing: a clamp counts as a change, which applies the settings and resizes
-/// the window. egui's own range clamps whenever the field loses keyboard focus,
-/// even when nothing was typed, so the range is applied here instead, and only
-/// to a value the user actually changed.
+/// An unfinished edit of a window size field, kept from frame to frame.
+#[derive(Clone, Copy)]
+struct SizeDraft {
+    /// The setting when the edit started.
+    base: f32,
+    value: f32,
+    /// The DragValue's id, whose text egui keeps while it has focus.
+    widget: egui::Id,
+    pass: u64,
+}
+
+/// A width or height field for the custom window size. It edits a draft and
+/// commits it (the response reports `changed`) only when the edit is finished:
+/// on Enter or leaving the field, or when a drag is released. A commit applies
+/// the settings, which resizes the window, saves them and resets the default
+/// column layout, so the steps of an edit (each keystroke, each frame of a
+/// drag, each arrow press) must not count. Escape cancels the edit, and so does
+/// anything that stops the field being drawn mid-edit (another Settings tab) or
+/// changes the size from outside (resizing the window, the reset button).
+///
+/// The window can be smaller than `range` (down to `MIN_WIDTH` x `MIN_HEIGHT`)
+/// and that size is copied into the settings, so the range is applied to the
+/// user's edits only, never to a value the field is just showing. egui's own
+/// range can't do that: it clamps whenever the field loses focus.
 fn window_size_field(
     ui: &mut egui::Ui,
+    id_salt: &str,
     value: &mut f32,
     range: std::ops::RangeInclusive<f32>,
 ) -> egui::Response {
-    let old_value = *value;
+    let draft_id = ui.id().with(id_salt);
+    let pass = ui.ctx().cumulative_pass_nr();
+    let stored = ui.data(|data| data.get_temp::<SizeDraft>(draft_id));
+    ui.data_mut(|data| data.remove::<SizeDraft>(draft_id));
+    let kept = stored.filter(|draft| draft.pass + 1 == pass && draft.base == *value);
+    if let (Some(stale), None) = (stored, kept) {
+        ui.data_mut(|data| data.remove::<String>(stale.widget));
+    }
+    let base = kept.map_or(*value, |draft| draft.base);
+    let mut draft = kept.map_or(*value, |draft| draft.value);
+
     let mut response = ui.add_sized(
         [SETTINGS_VALUE_WIDTH, ui.spacing().interact_size.y],
-        egui::DragValue::new(value).speed(1.0),
+        egui::DragValue::new(&mut draft)
+            .update_while_editing(false)
+            .speed(1.0),
     );
     if response.changed() {
-        *value = value.clamp(*range.start(), *range.end());
-        // Stepping past an end of the range clamps straight back.
-        if *value == old_value {
-            response.flags.set(egui::response::Flags::CHANGED, false);
+        let clamped = draft.clamp(*range.start(), *range.end());
+        if clamped != draft {
+            draft = clamped;
+            // While the field has focus egui shows the text it stored last
+            // frame; drop it so the field shows the clamped draft.
+            ui.data_mut(|data| data.remove::<String>(response.id));
         }
     }
+
+    // egui itself aborts a drag on Escape and won't start another until the
+    // button is pressed again, so only a keyboard edit needs cancelling here.
+    let committed = if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+        // Keep no draft, and drop egui's text too, because egui re-parses it
+        // on the next frame (it still reports lost focus there but no longer
+        // sees the Escape).
+        ui.data_mut(|data| data.remove::<String>(response.id));
+        false
+    } else if response.has_focus() || response.dragged() {
+        let edit = SizeDraft {
+            base,
+            value: draft,
+            widget: response.id,
+            pass,
+        };
+        ui.data_mut(|data| data.insert_temp(draft_id, edit));
+        false
+    } else if draft != base {
+        *value = draft;
+        true
+    } else {
+        false
+    };
+    response
+        .flags
+        .set(egui::response::Flags::CHANGED, committed);
     response
 }
 
@@ -1240,97 +1301,242 @@ pub fn draw_settings_window(
 mod tests {
     use super::*;
 
-    /// Runs one frame with a width field (range 800..=4000) and returns its
-    /// response. `focus` is applied to the field before the frame.
-    fn width_frame(
-        ctx: &egui::Context,
-        width: &mut f32,
-        events: Vec<egui::Event>,
-        focus: Option<(egui::Id, bool)>,
-    ) -> egui::Response {
-        if let Some((id, focused)) = focus {
-            ctx.memory_mut(|mem| {
-                if focused {
-                    mem.request_focus(id)
-                } else {
-                    mem.surrender_focus(id)
-                }
-            });
+    /// A width field (range 800..=4000) driven frame by frame, counting the
+    /// commits it reports.
+    struct WidthField {
+        ctx: egui::Context,
+        width: f32,
+        id: egui::Id,
+        rect: egui::Rect,
+        commits: usize,
+    }
+
+    impl WidthField {
+        fn new(width: f32) -> Self {
+            let mut field = Self {
+                ctx: egui::Context::default(),
+                width,
+                id: egui::Id::NULL,
+                rect: egui::Rect::NOTHING,
+                commits: 0,
+            };
+            field.frame(vec![]);
+            field
         }
-        let input = egui::RawInput {
-            events,
-            ..Default::default()
-        };
-        let mut response = None;
-        let _ = ctx.run_ui(input, |ui| {
-            response = Some(window_size_field(ui, width, 800.0..=4000.0));
-        });
-        response.unwrap()
+
+        fn frame(&mut self, events: Vec<egui::Event>) {
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let mut response = None;
+            let width = &mut self.width;
+            let _ = self.ctx.run_ui(input, |ui| {
+                response = Some(window_size_field(ui, "width", width, 800.0..=4000.0));
+            });
+            let response = response.unwrap();
+            self.commits += response.changed() as usize;
+            self.id = response.id;
+            self.rect = response.rect;
+        }
+
+        fn focus(&mut self) {
+            let id = self.id;
+            self.ctx.memory_mut(|mem| mem.request_focus(id));
+            self.frame(vec![]);
+        }
+
+        fn leave(&mut self) {
+            let id = self.id;
+            self.ctx.memory_mut(|mem| mem.surrender_focus(id));
+            self.frame(vec![]);
+            self.frame(vec![]);
+        }
+
+        fn key(&mut self, key: egui::Key) {
+            self.frame(vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+
+        fn type_text(&mut self, text: &str) {
+            self.frame(vec![egui::Event::Text(text.into())]);
+        }
+
+        fn clear_text(&mut self) {
+            for _ in 0..4 {
+                self.key(egui::Key::Backspace);
+            }
+        }
+
+        /// A frame in which the field is not drawn, like another Settings tab.
+        fn hidden_frame(&mut self) {
+            let _ = self.ctx.run_ui(egui::RawInput::default(), |_| {});
+        }
+
+        /// The text the focused field shows.
+        fn shown_text(&self) -> Option<String> {
+            self.ctx.data(|data| data.get_temp::<String>(self.id))
+        }
+
+        fn pointer(&mut self, pos: egui::Pos2, pressed: Option<bool>) {
+            let mut events = vec![egui::Event::PointerMoved(pos)];
+            if let Some(pressed) = pressed {
+                events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            self.frame(events);
+        }
     }
 
     #[test]
-    fn showing_a_window_size_below_the_field_range_changes_nothing() {
-        let ctx = egui::Context::default();
-        let mut width = 700.0_f32;
-        let response = width_frame(&ctx, &mut width, vec![], None);
-        assert_eq!(width, 700.0);
-        assert!(!response.changed());
+    fn focusing_then_an_outside_resize_keeps_the_new_size() {
+        let mut field = WidthField::new(1000.0);
+        field.focus();
+        field.key(egui::Key::ArrowUp);
+        field.width = 1300.0; // the window was resized during the edit
+        field.frame(vec![]);
+        field.leave();
+        assert_eq!((field.width, field.commits), (1300.0, 0));
     }
 
     #[test]
-    fn clicking_into_a_size_field_and_out_again_changes_nothing() {
-        let ctx = egui::Context::default();
-        let mut width = 700.0_f32;
-        let id = width_frame(&ctx, &mut width, vec![], None).id;
-        let mut changed = false;
-        changed |= width_frame(&ctx, &mut width, vec![], Some((id, true))).changed();
-        changed |= width_frame(&ctx, &mut width, vec![], None).changed();
-        changed |= width_frame(&ctx, &mut width, vec![], Some((id, false))).changed();
-        changed |= width_frame(&ctx, &mut width, vec![], None).changed();
-        assert_eq!(width, 700.0);
-        assert!(!changed);
+    fn an_edit_left_on_another_tab_is_dropped() {
+        let mut field = WidthField::new(1000.0);
+        field.focus();
+        field.key(egui::Key::ArrowUp);
+        field.hidden_frame();
+        field.hidden_frame();
+        field.frame(vec![]);
+        field.frame(vec![]);
+        assert_eq!((field.width, field.commits), (1000.0, 0));
     }
 
     #[test]
-    fn stepping_past_the_maximum_size_changes_nothing() {
-        let ctx = egui::Context::default();
-        let mut width = 4000.0_f32;
-        let id = width_frame(&ctx, &mut width, vec![], None).id;
-        let up = egui::Event::Key {
-            key: egui::Key::ArrowUp,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        };
-        let mut changed = false;
-        changed |= width_frame(&ctx, &mut width, vec![], Some((id, true))).changed();
-        changed |= width_frame(&ctx, &mut width, vec![up], None).changed();
-        assert_eq!(width, 4000.0);
-        assert!(!changed);
+    fn escape_cancels_a_drag() {
+        let mut field = WidthField::new(1000.0);
+        let start = field.rect.center();
+        field.pointer(start, None);
+        field.pointer(start, Some(true));
+        for step in 1..=3 {
+            field.pointer(start + egui::vec2(10.0 * step as f32, 0.0), None);
+        }
+        field.key(egui::Key::Escape);
+        for step in 4..=6 {
+            field.pointer(start + egui::vec2(10.0 * step as f32, 0.0), None);
+        }
+        field.pointer(start + egui::vec2(60.0, 0.0), Some(false));
+        field.frame(vec![]);
+        field.frame(vec![]);
+        assert_eq!((field.width, field.commits), (1000.0, 0));
     }
 
     #[test]
-    fn a_typed_size_below_the_range_is_raised_to_its_minimum() {
-        let ctx = egui::Context::default();
-        let mut width = 1000.0_f32;
-        let id = width_frame(&ctx, &mut width, vec![], None).id;
-        let mut changed = false;
-        changed |= width_frame(&ctx, &mut width, vec![], Some((id, true))).changed();
-        // Replace "1000" with "5".
-        let backspace = egui::Event::Key {
-            key: egui::Key::Backspace,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        };
-        let mut typed = vec![backspace; 4];
-        typed.push(egui::Event::Text("5".into()));
-        changed |= width_frame(&ctx, &mut width, typed, None).changed();
-        changed |= width_frame(&ctx, &mut width, vec![], Some((id, false))).changed();
-        changed |= width_frame(&ctx, &mut width, vec![], None).changed();
-        assert_eq!(width, 800.0);
-        assert!(changed);
+    fn escape_cancels_arrow_steps() {
+        let mut field = WidthField::new(1000.0);
+        field.focus();
+        for _ in 0..3 {
+            field.key(egui::Key::ArrowUp);
+        }
+        field.key(egui::Key::Escape);
+        field.frame(vec![]);
+        assert_eq!((field.width, field.commits), (1000.0, 0));
+    }
+
+    #[test]
+    fn arrow_steps_are_committed_once_when_leaving_the_field() {
+        let mut field = WidthField::new(1000.0);
+        field.focus();
+        for _ in 0..3 {
+            field.key(egui::Key::ArrowUp);
+            assert_eq!((field.width, field.commits), (1000.0, 0));
+        }
+        field.leave();
+        assert_eq!((field.width, field.commits), (1003.0, 1));
+    }
+
+    #[test]
+    fn showing_a_window_size_below_the_field_range_commits_nothing() {
+        let mut field = WidthField::new(700.0);
+        field.frame(vec![]);
+        assert_eq!((field.width, field.commits), (700.0, 0));
+    }
+
+    #[test]
+    fn clicking_into_a_size_field_and_out_again_commits_nothing() {
+        let mut field = WidthField::new(700.0);
+        field.focus();
+        field.frame(vec![]);
+        field.leave();
+        assert_eq!((field.width, field.commits), (700.0, 0));
+    }
+
+    #[test]
+    fn a_typed_size_is_committed_once_when_leaving_the_field() {
+        let mut field = WidthField::new(1200.0);
+        field.focus();
+        field.clear_text();
+        for digit in ["1", "5", "0", "0"] {
+            field.type_text(digit);
+            assert_eq!((field.width, field.commits), (1200.0, 0), "after {digit}");
+        }
+        field.leave();
+        assert_eq!((field.width, field.commits), (1500.0, 1));
+    }
+
+    #[test]
+    fn enter_commits_a_typed_size() {
+        let mut field = WidthField::new(1200.0);
+        field.focus();
+        field.clear_text();
+        field.type_text("1500");
+        field.key(egui::Key::Enter);
+        field.frame(vec![]);
+        assert_eq!((field.width, field.commits), (1500.0, 1));
+    }
+
+    #[test]
+    fn a_typed_size_below_the_range_commits_the_minimum() {
+        let mut field = WidthField::new(1000.0);
+        field.focus();
+        field.clear_text();
+        field.type_text("5");
+        field.leave();
+        assert_eq!((field.width, field.commits), (800.0, 1));
+    }
+
+    #[test]
+    fn stepping_past_the_maximum_shows_and_commits_nothing_new() {
+        let mut field = WidthField::new(4000.0);
+        field.focus();
+        field.key(egui::Key::ArrowUp);
+        field.frame(vec![]);
+        assert_eq!(field.shown_text().as_deref(), Some("4000"));
+        field.leave();
+        assert_eq!((field.width, field.commits), (4000.0, 0));
+    }
+
+    #[test]
+    fn dragging_a_size_commits_once_on_release() {
+        let mut field = WidthField::new(1000.0);
+        let start = field.rect.center();
+        field.pointer(start, None);
+        field.pointer(start, Some(true));
+        for step in 1..=5 {
+            field.pointer(start + egui::vec2(10.0 * step as f32, 0.0), None);
+            assert_eq!((field.width, field.commits), (1000.0, 0), "step {step}");
+        }
+        field.pointer(start + egui::vec2(50.0, 0.0), Some(false));
+        field.frame(vec![]);
+        assert!(field.width > 1000.0, "width {}", field.width);
+        assert_eq!(field.commits, 1);
     }
 }
