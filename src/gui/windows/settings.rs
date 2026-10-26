@@ -754,6 +754,9 @@ fn draw_general_tab(
             },
         );
 
+        // The mode row above wrote the size this frame, so an edit in a size
+        // field is cancelled rather than committed over it.
+        let cancel_size_edit = window_size_changed;
         if let WindowSizeMode::Custom { width, height } =
             &mut settings.current_settings.window_size_mode
         {
@@ -764,8 +767,14 @@ fn draw_general_tab(
                 },
                 |ui| {
                     apply_eden_visual_overrides(ui, palette);
-                    window_size_changed |=
-                        window_size_field(ui, "window_width", width, 800.0..=4000.0).changed();
+                    window_size_changed |= window_size_field(
+                        ui,
+                        "window_width",
+                        width,
+                        800.0..=4000.0,
+                        cancel_size_edit,
+                    )
+                    .changed();
                 },
             );
 
@@ -776,8 +785,14 @@ fn draw_general_tab(
                 },
                 |ui| {
                     apply_eden_visual_overrides(ui, palette);
-                    window_size_changed |=
-                        window_size_field(ui, "window_height", height, 600.0..=3000.0).changed();
+                    window_size_changed |= window_size_field(
+                        ui,
+                        "window_height",
+                        height,
+                        600.0..=3000.0,
+                        cancel_size_edit,
+                    )
+                    .changed();
                 },
             );
         }
@@ -1015,8 +1030,13 @@ struct SizeDraft {
 /// the settings, which resizes the window, saves them and resets the default
 /// column layout, so the steps of an edit (each keystroke, each frame of a
 /// drag, each arrow press) must not count. Escape cancels the edit, and so does
-/// anything that stops the field being drawn mid-edit (another Settings tab) or
-/// changes the size from outside (resizing the window, the reset button).
+/// anything that stops the field being drawn mid-edit (another Settings tab).
+///
+/// A write to the size from elsewhere in Settings (the reset button) cancels the
+/// edit too. The caller says so with `cancel_edit`, because comparing values
+/// can't see it: the reset can write the very size the edit started from. A
+/// size change from outside Settings (resizing the window) is still noticed by
+/// comparing values, which is right there, as an equal size is no change.
 ///
 /// The window can be smaller than `range` (down to `MIN_WIDTH` x `MIN_HEIGHT`)
 /// and that size is copied into the settings, so the range is applied to the
@@ -1027,12 +1047,14 @@ fn window_size_field(
     id_salt: &str,
     value: &mut f32,
     range: std::ops::RangeInclusive<f32>,
+    cancel_edit: bool,
 ) -> egui::Response {
     let draft_id = ui.id().with(id_salt);
     let pass = ui.ctx().cumulative_pass_nr();
     let stored = ui.data(|data| data.get_temp::<SizeDraft>(draft_id));
     ui.data_mut(|data| data.remove::<SizeDraft>(draft_id));
-    let kept = stored.filter(|draft| draft.pass + 1 == pass && draft.base == *value);
+    let kept =
+        stored.filter(|draft| !cancel_edit && draft.pass + 1 == pass && draft.base == *value);
     if let (Some(stale), None) = (stored, kept) {
         ui.data_mut(|data| data.remove::<String>(stale.widget));
     }
@@ -1309,6 +1331,8 @@ mod tests {
         id: egui::Id,
         rect: egui::Rect,
         commits: usize,
+        /// Set by `reset_to` for the next frame.
+        cancel_edit: bool,
     }
 
     impl WidthField {
@@ -1319,6 +1343,7 @@ mod tests {
                 id: egui::Id::NULL,
                 rect: egui::Rect::NOTHING,
                 commits: 0,
+                cancel_edit: false,
             };
             field.frame(vec![]);
             field
@@ -1331,8 +1356,15 @@ mod tests {
             };
             let mut response = None;
             let width = &mut self.width;
+            let cancel_edit = std::mem::take(&mut self.cancel_edit);
             let _ = self.ctx.run_ui(input, |ui| {
-                response = Some(window_size_field(ui, "width", width, 800.0..=4000.0));
+                response = Some(window_size_field(
+                    ui,
+                    "width",
+                    width,
+                    800.0..=4000.0,
+                    cancel_edit,
+                ));
             });
             let response = response.unwrap();
             self.commits += response.changed() as usize;
@@ -1371,6 +1403,13 @@ mod tests {
             for _ in 0..4 {
                 self.key(egui::Key::Backspace);
             }
+        }
+
+        /// The reset button writes `width` in the next frame, before the field
+        /// is drawn.
+        fn reset_to(&mut self, width: f32) {
+            self.width = width;
+            self.cancel_edit = true;
         }
 
         /// A frame in which the field is not drawn, like another Settings tab.
@@ -1522,6 +1561,48 @@ mod tests {
         assert_eq!(field.shown_text().as_deref(), Some("4000"));
         field.leave();
         assert_eq!((field.width, field.commits), (4000.0, 0));
+    }
+
+    #[test]
+    fn the_reset_button_cancels_a_typed_size_when_the_size_is_already_the_default() {
+        let mut field = WidthField::new(1200.0);
+        field.focus();
+        field.clear_text();
+        field.type_text("1500");
+        let elsewhere = field.rect.right_bottom() + egui::vec2(200.0, 200.0);
+        field.pointer(elsewhere, Some(true));
+        // The release clicks the reset button, which is drawn before the fields
+        // and writes the default (the value the field already started from).
+        field.reset_to(1200.0);
+        field.pointer(elsewhere, Some(false));
+        field.frame(vec![]);
+        assert_eq!((field.width, field.commits), (1200.0, 0));
+        assert_eq!(field.shown_text(), None);
+    }
+
+    #[test]
+    fn the_reset_button_cancels_a_typed_size() {
+        let mut field = WidthField::new(1000.0);
+        field.focus();
+        field.clear_text();
+        field.type_text("1500");
+        let elsewhere = field.rect.right_bottom() + egui::vec2(200.0, 200.0);
+        field.pointer(elsewhere, Some(true));
+        field.reset_to(1200.0);
+        field.pointer(elsewhere, Some(false));
+        field.frame(vec![]);
+        assert_eq!((field.width, field.commits), (1200.0, 0));
+    }
+
+    #[test]
+    fn an_outside_resize_to_the_same_size_keeps_the_edit() {
+        let mut field = WidthField::new(1000.0);
+        field.focus();
+        field.key(egui::Key::ArrowUp);
+        field.width = 1000.0; // the window was resized back to the same size
+        field.frame(vec![]);
+        field.leave();
+        assert_eq!((field.width, field.commits), (1001.0, 1));
     }
 
     #[test]
